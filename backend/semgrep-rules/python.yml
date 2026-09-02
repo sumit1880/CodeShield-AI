@@ -1,0 +1,62 @@
+rules:
+  - id: py-sql-injection-format
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Possible SQL Injection: SQL query appears to be built with string
+      formatting/concatenation instead of parameterized query bindings.
+    patterns:
+      - pattern-either:
+          - pattern: $CURSOR.execute("..." % $VAR)
+          - pattern: $CURSOR.execute(f"...{$VAR}...")
+          - pattern: $CURSOR.execute("..." + $VAR)
+    metadata:
+      cwe: "CWE-89"
+      category: security
+
+  - id: py-command-injection
+    languages: [python]
+    severity: ERROR
+    message: "Possible OS Command Injection via os.system/subprocess with shell=True."
+    patterns:
+      - pattern-either:
+          - pattern: os.system($CMD)
+          - pattern: subprocess.$FUNC(..., shell=True, ...)
+    metadata:
+      cwe: "CWE-78"
+      category: security
+
+  - id: py-hardcoded-secret
+    languages: [python]
+    severity: WARNING
+    message: "Possible hard-coded credential/secret assigned directly in source."
+    patterns:
+      - pattern-either:
+          - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(api_?key|secret|password|token)
+    metadata:
+      cwe: "CWE-798"
+      category: security
+
+  - id: py-eval-usage
+    languages: [python]
+    severity: ERROR
+    message: "Use of eval()/exec() with dynamic input can lead to code injection."
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+    metadata:
+      cwe: "CWE-95"
+      category: security
+
+  - id: py-yaml-unsafe-load
+    languages: [python]
+    severity: ERROR
+    message: "yaml.load() without a safe Loader can execute arbitrary code during deserialization."
+    pattern: yaml.load($DATA)
+    metadata:
+      cwe: "CWE-502"
+      category: security

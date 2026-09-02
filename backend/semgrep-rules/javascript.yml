@@ -1,0 +1,53 @@
+rules:
+  - id: js-sql-injection-concat
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Possible SQL Injection: SQL query string appears to be built via
+      concatenation with a variable instead of a parameterized query.
+    patterns:
+      - pattern-either:
+          - pattern: $DB.query("..." + $VAR + "...", ...)
+          - pattern: $DB.query(`...${$VAR}...`, ...)
+          - pattern: $DB.execute("..." + $VAR + "...", ...)
+    metadata:
+      cwe: "CWE-89"
+      category: security
+
+  - id: js-command-injection
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Possible OS Command Injection: user-controlled data passed to a
+      shell-executing function.
+    patterns:
+      - pattern-either:
+          - pattern: child_process.exec($CMD, ...)
+          - pattern: exec($CMD, ...)
+    metadata:
+      cwe: "CWE-78"
+      category: security
+
+  - id: js-hardcoded-secret
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      Possible hard-coded credential/secret assigned directly in source.
+    patterns:
+      - pattern-either:
+          - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(api_?key|secret|password|token)
+    metadata:
+      cwe: "CWE-798"
+      category: security
+
+  - id: js-eval-usage
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Use of eval() with dynamic input can lead to code injection."
+    pattern: eval(...)
+    metadata:
+      cwe: "CWE-95"
+      category: security

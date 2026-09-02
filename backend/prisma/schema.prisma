@@ -1,0 +1,98 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum VerificationStatus {
+  CONFIRMED
+  REJECTED
+}
+
+enum AnalysisStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum SourceType {
+  PASTE
+  ZIP
+}
+
+model Analysis {
+  id          String         @id @default(cuid())
+  language    String
+  codeHash    String
+  sourceType  SourceType
+  status      AnalysisStatus @default(PENDING)
+  createdAt   DateTime       @default(now())
+  completedAt DateTime?
+  durationMs  Int?
+
+  findings Finding[]
+
+  @@index([codeHash])
+  @@index([createdAt])
+}
+
+model Finding {
+  id                  String              @id @default(cuid())
+  analysisId          String
+  analysis            Analysis            @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  title               String
+  category            String?
+  cweId               String
+  cweName             String
+  severity            Severity
+  confidence          Float
+  file                String
+  function            String?
+  lineStart           Int
+  lineEnd             Int
+  explanation         String
+  recommendation      String
+  verificationStatus  VerificationStatus
+  verificationReason  String
+  createdAt           DateTime            @default(now())
+
+  @@index([analysisId])
+}
+
+model KnowledgeDocument {
+  id        String   @id @default(cuid())
+  title     String
+  source    String
+  content   String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  chunks KnowledgeChunk[]
+}
+
+model KnowledgeChunk {
+  id         String            @id @default(cuid())
+  documentId String
+  document   KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  content    String
+  /// pgvector column; managed via raw SQL migration (Prisma has no native vector type)
+  embedding  Unsupported("vector(768)")?
+  metadata   Json?
+  createdAt  DateTime          @default(now())
+
+  @@index([documentId])
+}
