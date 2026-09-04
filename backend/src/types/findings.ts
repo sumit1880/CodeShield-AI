@@ -1,5 +1,10 @@
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
-export type VerificationStatus = 'CONFIRMED' | 'REJECTED';
+/**
+ * 'UNCERTAIN' is an internal verdict only: it tells the Manager Agent more
+ * evidence is needed and is never persisted or returned to the API — only
+ * CONFIRMED findings ever reach VulnerabilityResponse/the database.
+ */
+export type VerificationStatus = 'CONFIRMED' | 'REJECTED' | 'UNCERTAIN';
 
 export interface SemgrepFinding {
   ruleId: string;

@@ -43,7 +43,7 @@ export const KNOWN_CWE_IDS = [
 export const cweIdSchema = z.enum(KNOWN_CWE_IDS as unknown as [string, ...string[]]);
 
 export const severitySchema = z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']);
-export const verificationStatusSchema = z.enum(['CONFIRMED', 'REJECTED']);
+export const verificationStatusSchema = z.enum(['CONFIRMED', 'REJECTED', 'UNCERTAIN']);
 
 // ---------------------------------------------------------------------------
 // Agent 1: Detection

@@ -3,21 +3,19 @@ import { PrismaClient } from '@prisma/client';
 import { DetectionAgent } from '../agents/detection.agent';
 import { ClassificationAgent } from '../agents/classification.agent';
 import { VerificationAgent } from '../agents/verification.agent';
+import { ManagerAgent } from '../agents/manager.agent';
 import { SemgrepService } from '../services/semgrep/semgrep.service';
 import { RagService } from '../services/rag/rag.service';
 import { CodeContextService } from '../services/code-context/code-context.service';
+import { CodeSearchService } from '../services/code-context/code-search.service';
+import { createToolRegistry } from './tool-registry';
 import { withTempDir } from '../utils/temp-workspace';
 import { ApiError, ErrorCode } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { isSupportedLanguage, languageForExtension } from '../config/languages';
 import { env } from '../config/env';
-import {
-  AnalyzedFinding,
-  CandidateFinding,
-  SemgrepFinding,
-  VerificationResult,
-  VulnerabilityResponse
-} from '../types/findings';
+import { AnalysisState } from '../types/agent-state';
+import { SemgrepFinding, VulnerabilityResponse } from '../types/findings';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -25,9 +23,11 @@ export interface OrchestratorDeps {
   detectionAgent: DetectionAgent;
   classificationAgent: ClassificationAgent;
   verificationAgent: VerificationAgent;
+  managerAgent: ManagerAgent;
   semgrepService: SemgrepService;
   ragService: RagService;
   codeContextService: CodeContextService;
+  codeSearchService: CodeSearchService;
   prisma: PrismaClient;
 }
 
@@ -105,11 +105,14 @@ export class AnalysisOrchestrator {
       await fs.writeFile(filePath, code, 'utf-8');
 
       const semgrepFindings = await this.runSemgrepSafely(tempDir, language, 'server.js');
+      const submissionFile = 'submission' + ext;
 
-      const result = await this.runPipeline({
+      const result = await this.runAgenticPipeline({
         language,
         sourceCode: code,
-        semgrepFindings: semgrepFindings.map((f) => ({ ...f, file: 'submission' + ext }))
+        semgrepFindings: semgrepFindings.map((f) => ({ ...f, file: submissionFile })),
+        projectRoot: tempDir,
+        files: [submissionFile]
       });
 
       const analysisId = await this.persist({
@@ -166,10 +169,12 @@ export class AnalysisOrchestrator {
       .map((c) => `// File: ${c.file} (lines ${c.startLine}-${c.endLine})\n${c.snippet}`)
       .join('\n\n---\n\n');
 
-    const result = await this.runPipeline({
+    const result = await this.runAgenticPipeline({
       language: effectiveLanguage,
       sourceCode: sourceView || '// No Semgrep findings to provide context for.',
-      semgrepFindings: normalizedFindings
+      semgrepFindings: normalizedFindings,
+      projectRoot,
+      files: relevantFiles.map((f) => f.relativePath)
     });
 
     const analysisId = await this.persist({
@@ -184,58 +189,119 @@ export class AnalysisOrchestrator {
   }
 
   // -------------------------------------------------------------------
-  // Shared pipeline: Semgrep(already run) -> RAG -> Agent1 -> Agent2 -> Agent3 -> filter
+  // Bounded autonomous multi-agent pipeline.
+  //
+  // Semgrep has already run once (see callers). From here, a Manager Agent
+  // observes compact state and repeatedly picks ONE action from a fixed
+  // safe set (see tool-registry.ts), which is validated and dispatched —
+  // the Manager never executes anything directly and cannot request
+  // arbitrary tools. The loop is bounded by hard, code-enforced safety
+  // limits (AGENT_MAX_ITERATIONS / AGENT_MAX_TOOL_CALLS / AGENT_MAX_ANALYSIS_TIME_MS),
+  // which always take priority over the Manager's own FINISH/continue choice.
   // -------------------------------------------------------------------
-  private async runPipeline(params: {
+  private async runAgenticPipeline(params: {
     language: string;
     sourceCode: string;
     semgrepFindings: SemgrepFinding[];
+    projectRoot: string;
+    files: string[];
   }): Promise<VulnerabilityResponse[]> {
-    const { language, sourceCode, semgrepFindings } = params;
+    const { language, sourceCode, semgrepFindings, projectRoot, files } = params;
 
-    const knowledge = await this.deps.ragService.retrieve({
-      query: `Common vulnerability classes and secure coding guidance relevant to ${language} code`,
-      topK: 5
-    });
+    const state: AnalysisState = {
+      goal: 'Identify, classify, and verify real security vulnerabilities in the submitted code.',
+      language,
+      files,
+      semgrepFindings,
+      candidateFindings: [],
+      classifiedFindings: [],
+      verifiedById: new Map(),
+      knowledge: [],
+      evidence: [],
+      actionsTaken: [],
+      iteration: 0,
+      toolCallCount: 0,
+      status: 'RUNNING'
+    };
 
-    const detection = await this.deps.detectionAgent.run({ language, sourceCode, semgrepFindings });
+    const tools = createToolRegistry(
+      {
+        detectionAgent: this.deps.detectionAgent,
+        classificationAgent: this.deps.classificationAgent,
+        verificationAgent: this.deps.verificationAgent,
+        semgrepService: this.deps.semgrepService,
+        ragService: this.deps.ragService,
+        codeSearchService: this.deps.codeSearchService
+      },
+      {
+        projectRoot,
+        language,
+        getSourceView: () =>
+          state.evidence.length === 0
+            ? sourceCode
+            : [sourceCode, '\n--- Additional evidence gathered during analysis ---', ...state.evidence].join('\n')
+      }
+    );
 
-    if (detection.findings.length === 0) {
-      return [];
+    logger.info('[Agent] Starting security analysis');
+
+    const deadline = Date.now() + env.agent.maxAnalysisTimeMs;
+
+    while (state.status === 'RUNNING') {
+      state.iteration++;
+
+      if (state.iteration > env.agent.maxIterations) {
+        logger.warn('[Agent] Max iterations reached, finishing');
+        break;
+      }
+      if (state.toolCallCount >= env.agent.maxToolCalls) {
+        logger.warn('[Agent] Max tool calls reached, finishing');
+        break;
+      }
+      if (Date.now() > deadline) {
+        logger.warn('[Agent] Max analysis time reached, finishing');
+        break;
+      }
+
+      const decision = await this.deps.managerAgent.decide(state);
+      logger.info({ action: decision.action, reason: decision.reason }, `[Agent] Decision: ${decision.action}`);
+
+      if (decision.action === 'FINISH') break;
+
+      const handler = tools[decision.action];
+      state.toolCallCount++;
+
+      try {
+        const { resultSummary } = await handler(state, decision.arguments);
+        state.actionsTaken.push({ iteration: state.iteration, action: decision.action, reason: decision.reason, resultSummary });
+        logger.info({ result: resultSummary }, `[Tool] ${decision.action} completed`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown tool error';
+        state.actionsTaken.push({ iteration: state.iteration, action: decision.action, reason: decision.reason, error: message });
+        logger.warn({ err }, `[Tool] ${decision.action} failed; Manager will decide how to proceed`);
+      }
     }
 
-    const classification = await this.deps.classificationAgent.run({
-      language,
-      sourceCode,
-      findings: detection.findings,
-      securityKnowledge: knowledge
-    });
-
-    if (classification.findings.length === 0) {
-      return [];
-    }
-
-    const verification = await this.deps.verificationAgent.run({
-      language,
-      sourceCode,
-      findings: classification.findings
-    });
-
-    return this.mergeAndFilter(classification.findings, verification.findings);
+    state.status = 'DONE';
+    return this.finalizeFindings(state);
   }
 
-  private mergeAndFilter(
-    analyzed: AnalyzedFinding[],
-    verifications: VerificationResult[]
-  ): VulnerabilityResponse[] {
-    const verificationById = new Map(verifications.map((v) => [v.id, v]));
-
+  private finalizeFindings(state: AnalysisState): VulnerabilityResponse[] {
     const merged: VulnerabilityResponse[] = [];
-    for (const finding of analyzed) {
-      const verdict = verificationById.get(finding.id);
-      if (!verdict || verdict.status === 'REJECTED') {
-        continue; // Rejected findings MUST NOT appear in the final response.
+    let unresolved = 0;
+
+    for (const finding of state.classifiedFindings) {
+      const verdict = state.verifiedById.get(finding.id);
+
+      if (!verdict || verdict.status !== 'CONFIRMED') {
+        // REJECTED findings must never appear in the response. Findings
+        // that never got a verdict, or remained UNCERTAIN when the loop
+        // ended (e.g. a safety limit was hit), are dropped conservatively
+        // rather than shipped unverified.
+        if (!verdict || verdict.status === 'UNCERTAIN') unresolved++;
+        continue;
       }
+
       merged.push({
         id: finding.id,
         title: finding.title,
@@ -248,6 +314,11 @@ export class AnalysisOrchestrator {
         verification: { status: verdict.status, confidence: verdict.confidence }
       });
     }
+
+    if (unresolved > 0) {
+      logger.warn({ unresolved }, '[Agent] Finished with unresolved/uncertain findings dropped from the response');
+    }
+
     return merged;
   }
 

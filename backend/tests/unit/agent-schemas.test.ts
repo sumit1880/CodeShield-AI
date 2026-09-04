@@ -78,4 +78,11 @@ describe('verificationOutputSchema', () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it('accepts UNCERTAIN as a verdict for the agent loop', () => {
+    const result = verificationOutputSchema.safeParse({
+      findings: [{ id: 'F1', status: 'UNCERTAIN', confidence: 0.5, reason: 'insufficient evidence' }]
+    });
+    expect(result.success).toBe(true);
+  });
 });

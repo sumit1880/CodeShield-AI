@@ -45,6 +45,12 @@ export const env = {
   ai: {
     requestTimeoutMs: intEnv('AI_REQUEST_TIMEOUT_MS', 60000),
     maxRetries: intEnv('AI_MAX_RETRIES', 2)
+  },
+
+  agent: {
+    maxIterations: intEnv('AGENT_MAX_ITERATIONS', 10),
+    maxToolCalls: intEnv('AGENT_MAX_TOOL_CALLS', 20),
+    maxAnalysisTimeMs: intEnv('AGENT_MAX_ANALYSIS_TIME_MS', 120000)
   }
 };
 

@@ -7,6 +7,8 @@ import { VerificationAgent } from '../../src/agents/verification.agent';
 import { SemgrepService } from '../../src/services/semgrep/semgrep.service';
 import { RagService } from '../../src/services/rag/rag.service';
 import { CodeContextService } from '../../src/services/code-context/code-context.service';
+import { CodeSearchService } from '../../src/services/code-context/code-search.service';
+import { ManagerAgent } from '../../src/agents/manager.agent';
 
 function buildOrchestrator() {
   const llm = new FakeLlmService();
@@ -18,9 +20,11 @@ function buildOrchestrator() {
     detectionAgent: new DetectionAgent(llm),
     classificationAgent: new ClassificationAgent(llm),
     verificationAgent: new VerificationAgent(llm),
+    managerAgent: new ManagerAgent(llm),
     semgrepService,
     ragService,
     codeContextService: new CodeContextService(),
+    codeSearchService: new CodeSearchService(),
     prisma
   });
 

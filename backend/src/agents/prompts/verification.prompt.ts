@@ -11,8 +11,11 @@ finding, critically re-examine it and determine:
 - Is the confidence score reasonable given the evidence?
 
 Rules:
-- You review and confirm/reject EXISTING findings. Do NOT invent new findings, and do NOT
-  generate a completely new vulnerability list.
+- You review and confirm/reject/mark-uncertain EXISTING findings. Do NOT invent new findings,
+  and do NOT generate a completely new vulnerability list.
+- Use "UNCERTAIN" only when the code and evidence shown are genuinely insufficient to decide —
+  this signals the system to gather more evidence before finishing. Do not use it as a default;
+  most findings should resolve to CONFIRMED or REJECTED.
 - Every finding you were given must appear exactly once in your output, referenced by its
   original id.
 - Respond with ONLY valid JSON matching this exact shape, and nothing else:
@@ -21,7 +24,7 @@ Rules:
   "findings": [
     {
       "id": "same id as the analyzed finding",
-      "status": "CONFIRMED" | "REJECTED",
+      "status": "CONFIRMED" | "REJECTED" | "UNCERTAIN",
       "confidence": number between 0 and 1 (your own assessed confidence),
       "reason": "brief justification for your verdict"
     }
