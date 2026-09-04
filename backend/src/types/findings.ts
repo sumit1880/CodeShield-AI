@@ -57,6 +57,14 @@ export interface VerificationResult {
   reason: string;
 }
 
+/**
+ * The only verdicts that ever ship to the API/DB. 'UNCERTAIN' is filtered
+ * out in the orchestrator before a finding becomes a VulnerabilityResponse,
+ * so this narrower type keeps that guarantee checked by the compiler (and
+ * matches the persisted Prisma enum, which has no UNCERTAIN value).
+ */
+export type ShippedVerificationStatus = Exclude<VerificationStatus, 'UNCERTAIN'>;
+
 /** Final, client-facing shape of a single vulnerability. */
 export interface VulnerabilityResponse {
   id: string;
@@ -73,7 +81,7 @@ export interface VulnerabilityResponse {
   explanation: string;
   recommendation: string;
   verification: {
-    status: VerificationStatus;
+    status: ShippedVerificationStatus;
     confidence: number;
   };
 }
