@@ -5,12 +5,18 @@ import { LlmRequest, LlmResponse, LlmService } from '../../src/services/llm/llm.
  * returned in order. Used so agent/orchestrator tests never call a real
  * Gemini API.
  */
+interface QueuedResponse {
+  text: string;
+  /** Optional artificial delay (ms) before resolving, to simulate a slow LLM call in timeout tests. */
+  delayMs?: number;
+}
+
 export class FakeLlmService implements LlmService {
-  private queue: string[] = [];
+  private queue: QueuedResponse[] = [];
   public calls: LlmRequest[] = [];
 
-  enqueue(jsonResponse: object | string): this {
-    this.queue.push(typeof jsonResponse === 'string' ? jsonResponse : JSON.stringify(jsonResponse));
+  enqueue(jsonResponse: object | string, delayMs?: number): this {
+    this.queue.push({ text: typeof jsonResponse === 'string' ? jsonResponse : JSON.stringify(jsonResponse), delayMs });
     return this;
   }
 
@@ -20,6 +26,9 @@ export class FakeLlmService implements LlmService {
     if (next === undefined) {
       throw new Error('FakeLlmService: no more queued responses');
     }
-    return { text: next };
+    if (next.delayMs) {
+      await new Promise((resolve) => setTimeout(resolve, next.delayMs));
+    }
+    return { text: next.text };
   }
 }

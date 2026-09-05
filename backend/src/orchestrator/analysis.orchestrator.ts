@@ -14,8 +14,8 @@ import { ApiError, ErrorCode } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { isSupportedLanguage, languageForExtension } from '../config/languages';
 import { env } from '../config/env';
-import { AnalysisState } from '../types/agent-state';
-import { SemgrepFinding, VulnerabilityResponse } from '../types/findings';
+import { AnalysisState, ManagerDecision } from '../types/agent-state';
+import { SemgrepFinding, UncertainFindingResponse, VulnerabilityResponse } from '../types/findings';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -56,6 +56,19 @@ export interface AnalysisResult {
   language: string;
   summary: AnalysisSummary;
   vulnerabilities: VulnerabilityResponse[];
+  /** Classified findings that are neither safely CONFIRMED nor REJECTED (see UncertainFindingResponse). */
+  uncertainFindings: UncertainFindingResponse[];
+  /** True when the analysis stopped (safety limits/timeout) before every finding reached a final verdict. */
+  partial: boolean;
+  analysisStatus: 'COMPLETE' | 'PARTIAL';
+}
+
+/** Result of turning final agent state into the client-facing finding lists. */
+interface FinalizedFindings {
+  vulnerabilities: VulnerabilityResponse[];
+  uncertainFindings: UncertainFindingResponse[];
+  rejectedCount: number;
+  partial: boolean;
 }
 
 function hashCode(code: string): string {
@@ -120,10 +133,18 @@ export class AnalysisOrchestrator {
         codeHash: hashCode(code),
         sourceType: 'PASTE',
         durationMs: Date.now() - startedAt,
-        vulnerabilities: result
+        vulnerabilities: result.vulnerabilities
       });
 
-      return { id: analysisId, language, summary: summarize(result), vulnerabilities: result };
+      return {
+        id: analysisId,
+        language,
+        summary: summarize(result.vulnerabilities),
+        vulnerabilities: result.vulnerabilities,
+        uncertainFindings: result.uncertainFindings,
+        partial: result.partial,
+        analysisStatus: result.partial ? 'PARTIAL' : 'COMPLETE'
+      };
     });
   }
 
@@ -182,10 +203,18 @@ export class AnalysisOrchestrator {
       codeHash: hashCode(relevantFiles.map((f) => f.relativePath).join('|')),
       sourceType: 'ZIP',
       durationMs: Date.now() - startedAt,
-      vulnerabilities: result
+      vulnerabilities: result.vulnerabilities
     });
 
-    return { id: analysisId, language: effectiveLanguage, summary: summarize(result), vulnerabilities: result };
+    return {
+      id: analysisId,
+      language: effectiveLanguage,
+      summary: summarize(result.vulnerabilities),
+      vulnerabilities: result.vulnerabilities,
+      uncertainFindings: result.uncertainFindings,
+      partial: result.partial,
+      analysisStatus: result.partial ? 'PARTIAL' : 'COMPLETE'
+    };
   }
 
   // -------------------------------------------------------------------
@@ -205,7 +234,7 @@ export class AnalysisOrchestrator {
     semgrepFindings: SemgrepFinding[];
     projectRoot: string;
     files: string[];
-  }): Promise<VulnerabilityResponse[]> {
+  }): Promise<FinalizedFindings> {
     const { language, sourceCode, semgrepFindings, projectRoot, files } = params;
 
     const state: AnalysisState = {
@@ -246,25 +275,39 @@ export class AnalysisOrchestrator {
     logger.info('[Agent] Starting security analysis');
 
     const deadline = Date.now() + env.agent.maxAnalysisTimeMs;
+    let stopReason: 'FINISHED' | 'MAX_ITERATIONS' | 'MAX_TOOL_CALLS' | 'TIMEOUT' = 'FINISHED';
 
     while (state.status === 'RUNNING') {
       state.iteration++;
 
       if (state.iteration > env.agent.maxIterations) {
         logger.warn('[Agent] Max iterations reached, finishing');
+        stopReason = 'MAX_ITERATIONS';
         break;
       }
       if (state.toolCallCount >= env.agent.maxToolCalls) {
         logger.warn('[Agent] Max tool calls reached, finishing');
+        stopReason = 'MAX_TOOL_CALLS';
         break;
       }
       if (Date.now() > deadline) {
         logger.warn('[Agent] Max analysis time reached, finishing');
+        stopReason = 'TIMEOUT';
         break;
       }
 
-      const decision = await this.deps.managerAgent.decide(state);
-      logger.info({ action: decision.action, reason: decision.reason }, `[Agent] Decision: ${decision.action}`);
+      // Deterministic pipeline progression: classification and verification
+      // are never left to the Manager's discretion once there is pending
+      // work for them, so the LLM cannot burn the whole time budget without
+      // the pipeline moving Detection -> Classification -> Verification.
+      // The Manager is only consulted for genuinely open choices: whether/how
+      // to detect, how to investigate an UNCERTAIN finding, or when to FINISH.
+      const forced = this.nextDeterministicAction(state);
+      const decision: ManagerDecision = forced ?? (await this.deps.managerAgent.decide(state));
+
+      if (!forced) {
+        logger.info({ action: decision.action, reason: decision.reason }, `[Agent] Decision: ${decision.action}`);
+      }
 
       if (decision.action === 'FINISH') break;
 
@@ -274,35 +317,57 @@ export class AnalysisOrchestrator {
       try {
         const { resultSummary } = await handler(state, decision.arguments);
         state.actionsTaken.push({ iteration: state.iteration, action: decision.action, reason: decision.reason, resultSummary });
-        logger.info({ result: resultSummary }, `[Tool] ${decision.action} completed`);
+        logger.info({ result: resultSummary }, `[Agent] ${decision.action} complete: ${resultSummary}`);
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown tool error';
         state.actionsTaken.push({ iteration: state.iteration, action: decision.action, reason: decision.reason, error: message });
-        logger.warn({ err }, `[Tool] ${decision.action} failed; Manager will decide how to proceed`);
+        logger.warn({ err }, `[Tool] ${decision.action} failed; continuing`);
       }
     }
 
     state.status = 'DONE';
-    return this.finalizeFindings(state);
+    logger.info('[Agent] Finalizing findings');
+    const finalized = this.finalizeFindings(state, stopReason);
+    logger.info(
+      { confirmed: finalized.vulnerabilities.length, uncertain: finalized.uncertainFindings.length, rejected: finalized.rejectedCount },
+      `[Agent] Analysis completed: ${finalized.vulnerabilities.length} confirmed, ${finalized.uncertainFindings.length} uncertain`
+    );
+    logger.info(`[Agent] Analysis partial: ${finalized.partial}`);
+    return finalized;
   }
 
-  private finalizeFindings(state: AnalysisState): VulnerabilityResponse[] {
-    const merged: VulnerabilityResponse[] = [];
-    let unresolved = 0;
+  /**
+   * Fixed, code-enforced priority (equivalent to):
+   *   IF unclassified candidates exist       -> CLASSIFY_FINDING
+   *   ELSE IF unverified classified findings  -> VERIFY_FINDING
+   *   ELSE                                    -> null (let the Manager decide)
+   * This guarantees Detection -> Classification -> Verification ordering and
+   * that verification always gets priority right after classification,
+   * without spending an LLM call on a decision that isn't actually a choice.
+   */
+  private nextDeterministicAction(state: AnalysisState): ManagerDecision | null {
+    const classifiedIds = new Set(state.classifiedFindings.map((f) => f.id));
+    const unclassified = state.candidateFindings.filter((f) => !classifiedIds.has(f.id));
+    if (unclassified.length > 0) {
+      return { action: 'CLASSIFY_FINDING', arguments: {}, reason: `${unclassified.length} candidate finding(s) pending classification.` };
+    }
+
+    const unverified = state.classifiedFindings.filter((f) => !state.verifiedById.has(f.id));
+    if (unverified.length > 0) {
+      return { action: 'VERIFY_FINDING', arguments: {}, reason: `${unverified.length} classified finding(s) pending verification.` };
+    }
+
+    return null;
+  }
+
+  private finalizeFindings(state: AnalysisState, stopReason: 'FINISHED' | 'MAX_ITERATIONS' | 'MAX_TOOL_CALLS' | 'TIMEOUT'): FinalizedFindings {
+    const vulnerabilities: VulnerabilityResponse[] = [];
+    const uncertainFindings: UncertainFindingResponse[] = [];
+    let rejectedCount = 0;
 
     for (const finding of state.classifiedFindings) {
       const verdict = state.verifiedById.get(finding.id);
-
-      if (!verdict || verdict.status !== 'CONFIRMED') {
-        // REJECTED findings must never appear in the response. Findings
-        // that never got a verdict, or remained UNCERTAIN when the loop
-        // ended (e.g. a safety limit was hit), are dropped conservatively
-        // rather than shipped unverified.
-        if (!verdict || verdict.status === 'UNCERTAIN') unresolved++;
-        continue;
-      }
-
-      merged.push({
+      const base = {
         id: finding.id,
         title: finding.title,
         cwe: finding.cwe,
@@ -310,16 +375,37 @@ export class AnalysisOrchestrator {
         confidence: finding.confidence,
         location: finding.location,
         explanation: finding.explanation,
-        recommendation: finding.recommendation,
-        verification: { status: verdict.status, confidence: verdict.confidence }
-      });
+        recommendation: finding.recommendation
+      };
+
+      if (verdict?.status === 'CONFIRMED') {
+        vulnerabilities.push({ ...base, verification: { status: 'CONFIRMED', confidence: verdict.confidence } });
+      } else if (verdict?.status === 'REJECTED') {
+        // Verified and explicitly rejected: never reported as a vulnerability.
+        rejectedCount++;
+      } else if (verdict?.status === 'UNCERTAIN') {
+        // The Verification Agent itself could not confirm or reject it.
+        uncertainFindings.push({ ...base, verification: { status: 'UNCERTAIN', confidence: verdict.confidence, reason: verdict.reason } });
+      } else {
+        // Classified but never reached verification at all (e.g. the global
+        // timeout hit first). Must not be silently dropped nor upgraded to
+        // CONFIRMED — report it as UNVERIFIED instead.
+        uncertainFindings.push({ ...base, verification: { status: 'UNVERIFIED', confidence: finding.confidence } });
+      }
     }
 
-    if (unresolved > 0) {
-      logger.warn({ unresolved }, '[Agent] Finished with unresolved/uncertain findings dropped from the response');
+    const classifiedIds = new Set(state.classifiedFindings.map((f) => f.id));
+    const unclassifiedCandidates = state.candidateFindings.filter((f) => !classifiedIds.has(f.id)).length;
+    const partial = stopReason !== 'FINISHED' || unclassifiedCandidates > 0 || uncertainFindings.length > 0;
+
+    if (uncertainFindings.length > 0 || unclassifiedCandidates > 0) {
+      logger.warn(
+        { uncertain: uncertainFindings.length, unclassifiedCandidates, stopReason },
+        '[Agent] Finished with uncertain/unclassified findings; returning them separately instead of dropping them'
+      );
     }
 
-    return merged;
+    return { vulnerabilities, uncertainFindings, rejectedCount, partial };
   }
 
   private async runSemgrepSafely(dir: string, language: string, _hint: string): Promise<SemgrepFinding[]> {

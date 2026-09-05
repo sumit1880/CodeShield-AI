@@ -48,6 +48,26 @@ export interface RunSemgrepOptions {
 
 export class SemgrepService {
   /**
+   * Lightweight runtime check ("semgrep --version") used at server startup
+   * to log whether Semgrep is actually reachable on PATH in this
+   * environment. Never throws; the app must keep running (LLM-only
+   * detection) even when Semgrep is unavailable.
+   */
+  async checkAvailability(): Promise<{ available: boolean; version?: string }> {
+    try {
+      const stdout = await new Promise<string>((resolve, reject) => {
+        execFile(env.semgrepPath, ['--version'], { timeout: 10_000 }, (error, out) => {
+          if (error) return reject(error);
+          resolve(out);
+        });
+      });
+      return { available: true, version: stdout.trim() };
+    } catch {
+      return { available: false };
+    }
+  }
+
+  /**
    * Scans a directory with Semgrep and returns normalized findings.
    * Never executes or compiles the scanned code.
    */

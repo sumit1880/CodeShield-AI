@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: codeshield-ai-backend
+    runtime: docker
+    plan: starter
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash
+      - key: EMBEDDING_MODEL
+        value: text-embedding-004
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: SEMGREP_PATH
+        value: semgrep
+      - key: AGENT_MAX_ANALYSIS_TIME_MS
+        value: "120000"
+      - key: AGENT_MAX_ITERATIONS
+        value: "10"
+      - key: AGENT_MAX_TOOL_CALLS
+        value: "20"

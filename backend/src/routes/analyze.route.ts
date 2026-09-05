@@ -63,6 +63,12 @@ function toApiShape(result: Awaited<ReturnType<Container['orchestrator']['analyz
     id: result.id,
     language: result.language,
     summary: result.summary,
-    vulnerabilities: result.vulnerabilities
+    vulnerabilities: result.vulnerabilities,
+    // Additive fields: existing consumers that only read `vulnerabilities`
+    // keep working unchanged. `uncertainFindings`/`partial` let a frontend
+    // that wants it distinguish "nothing found" from "ran out of time".
+    uncertainFindings: result.uncertainFindings ?? [],
+    partial: result.partial ?? false,
+    analysisStatus: result.analysisStatus ?? 'COMPLETE'
   };
 }

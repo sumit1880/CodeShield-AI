@@ -36,6 +36,7 @@ describe('AnalysisOrchestrator bounded autonomous pipeline (mocked LLM)', () => 
   it('Manager drives Semgrep -> Detection -> Classification -> Verification -> Finish, filtering rejected findings', async () => {
     const llm = new FakeLlmService();
 
+    // Detection is still a genuine Manager choice (nothing to classify/verify yet).
     llm.enqueue(managerDecision('DETECT_VULNERABILITIES', 'No candidates yet, run detection'));
 
     llm.enqueue({
@@ -61,8 +62,8 @@ describe('AnalysisOrchestrator bounded autonomous pipeline (mocked LLM)', () => 
       ]
     });
 
-    llm.enqueue(managerDecision('CLASSIFY_FINDING', 'Candidates need classification'));
-
+    // CLASSIFY_FINDING is now forced deterministically by the orchestrator
+    // as soon as unclassified candidates exist — no Manager decision needed.
     llm.enqueue({
       findings: [
         {
@@ -88,8 +89,9 @@ describe('AnalysisOrchestrator bounded autonomous pipeline (mocked LLM)', () => 
       ]
     });
 
-    llm.enqueue(managerDecision('VERIFY_FINDING', 'Classified findings need verification'));
-
+    // VERIFY_FINDING is likewise forced deterministically right after
+    // classification completes — this is the fix for the production bug
+    // where the Manager could stall indefinitely before ever verifying.
     llm.enqueue({
       findings: [
         { id: 'F1', status: 'CONFIRMED', confidence: 0.97, reason: 'Matches known SQLi pattern and data flow.' },
@@ -107,14 +109,17 @@ describe('AnalysisOrchestrator bounded autonomous pipeline (mocked LLM)', () => 
       code: VULNERABLE_SNIPPETS.sqlInjection.code
     });
 
-    // 4 Manager decisions + 3 specialist calls = 7 LLM calls total.
-    expect(llm.calls.length).toBe(7);
+    // 2 Manager decisions (DETECT, FINISH) + 3 specialist calls = 5 LLM calls total.
+    expect(llm.calls.length).toBe(5);
 
     expect(result.vulnerabilities).toHaveLength(1);
     expect(result.vulnerabilities[0].id).toBe('F1');
     expect(result.vulnerabilities[0].verification.status).toBe('CONFIRMED');
     expect(result.summary.totalIssues).toBe(1);
     expect(result.summary.high).toBe(1);
+    expect(result.partial).toBe(false);
+    expect(result.analysisStatus).toBe('COMPLETE');
+    expect(result.uncertainFindings).toHaveLength(0);
 
     expect(prismaCreateMock).toHaveBeenCalledTimes(1);
     const createArgs = prismaCreateMock.mock.calls[0][0];
@@ -158,7 +163,8 @@ describe('AnalysisOrchestrator bounded autonomous pipeline (mocked LLM)', () => 
       ]
     });
 
-    llm.enqueue(managerDecision('CLASSIFY_FINDING', 'Classify the candidate'));
+    // CLASSIFY_FINDING and VERIFY_FINDING are forced deterministically —
+    // no Manager decision consumed for either.
     llm.enqueue({
       findings: [
         {
@@ -174,7 +180,6 @@ describe('AnalysisOrchestrator bounded autonomous pipeline (mocked LLM)', () => 
       ]
     });
 
-    llm.enqueue(managerDecision('VERIFY_FINDING', 'Verify the classified finding'));
     llm.enqueue({
       findings: [{ id: 'F1', status: 'UNCERTAIN', confidence: 0.5, reason: 'Cannot tell if input is sanitized elsewhere.' }]
     });
@@ -194,10 +199,13 @@ describe('AnalysisOrchestrator bounded autonomous pipeline (mocked LLM)', () => 
       code: 'function run(cmd) { require("child_process").exec(cmd); }\n'
     });
 
-    // Detection(1)+Classification(1)+Verification(1)+Reanalyze(1) + 6 Manager decisions = 10.
-    expect(llm.calls.length).toBe(10);
+    // Detection(1)+Classification(1)+Verification(1)+Reanalyze(1) specialist calls
+    // + 4 Manager decisions (DETECT, SEARCH_CODE, REANALYZE_FINDING, FINISH) = 8.
+    expect(llm.calls.length).toBe(8);
     expect(result.vulnerabilities).toHaveLength(1);
     expect(result.vulnerabilities[0].verification.status).toBe('CONFIRMED');
+    expect(result.uncertainFindings).toHaveLength(0);
+    expect(result.partial).toBe(false);
   }, 30000);
 
   it('stops at the hard iteration limit even if the Manager keeps requesting more work', async () => {
@@ -220,5 +228,94 @@ describe('AnalysisOrchestrator bounded autonomous pipeline (mocked LLM)', () => 
 
     expect(llm.calls.length).toBe(20); // exactly 10 iterations worth; no 11th Manager call
     expect(result.vulnerabilities).toHaveLength(0);
+    // Stopped by a hard safety limit rather than a clean Manager FINISH.
+    expect(result.partial).toBe(true);
+    expect(result.analysisStatus).toBe('PARTIAL');
+  }, 30000);
+
+  it('returns already-classified findings as uncertain/unverified instead of dropping them when the global timeout hits before verification', async () => {
+    const originalTimeout = process.env.AGENT_MAX_ANALYSIS_TIME_MS;
+    process.env.AGENT_MAX_ANALYSIS_TIME_MS = '50';
+    jest.resetModules();
+
+    try {
+      const { AnalysisOrchestrator: FreshOrchestrator } = await import('../../src/orchestrator/analysis.orchestrator');
+      const { DetectionAgent: FreshDetectionAgent } = await import('../../src/agents/detection.agent');
+      const { ClassificationAgent: FreshClassificationAgent } = await import('../../src/agents/classification.agent');
+      const { VerificationAgent: FreshVerificationAgent } = await import('../../src/agents/verification.agent');
+      const { ManagerAgent: FreshManagerAgent } = await import('../../src/agents/manager.agent');
+      const { SemgrepService: FreshSemgrepService } = await import('../../src/services/semgrep/semgrep.service');
+
+      const llm = new FakeLlmService();
+      // Detection: a genuine Manager choice.
+      llm.enqueue(managerDecision('DETECT_VULNERABILITIES', 'Run detection'));
+      llm.enqueue({
+        findings: [
+          {
+            id: 'F1',
+            title: 'SQL Injection',
+            category: 'Injection',
+            evidence: 'string concatenation into db.query',
+            file: 'submission.js',
+            lineStart: 3,
+            lineEnd: 5
+          }
+        ]
+      });
+      // Classification is forced deterministically. Delay this response past
+      // the 50ms budget so the loop's next deadline check trips *before*
+      // VERIFY_FINDING can run, simulating the production timeout.
+      llm.enqueue(
+        {
+          findings: [
+            {
+              id: 'F1',
+              title: 'SQL Injection',
+              cwe: { id: 'CWE-89', name: 'Improper Neutralization of Special Elements used in an SQL Command' },
+              severity: 'HIGH',
+              confidence: 0.9,
+              location: { file: 'submission.js', function: 'getUser', lineStart: 3, lineEnd: 5 },
+              explanation: 'User-controlled input is concatenated into a SQL query string.',
+              recommendation: 'Use parameterized queries.'
+            }
+          ]
+        },
+        200
+      );
+
+      const ragService = { retrieve: jest.fn().mockResolvedValue([]) } as any;
+      const prisma = { analysis: { create: jest.fn().mockResolvedValue({ id: 'analysis-timeout' }) } } as any;
+      const { CodeContextService: FreshCodeContextService } = await import('../../src/services/code-context/code-context.service');
+      const { CodeSearchService: FreshCodeSearchService } = await import('../../src/services/code-context/code-search.service');
+
+      const orchestrator = new FreshOrchestrator({
+        detectionAgent: new FreshDetectionAgent(llm),
+        classificationAgent: new FreshClassificationAgent(llm),
+        verificationAgent: new FreshVerificationAgent(llm),
+        managerAgent: new FreshManagerAgent(llm),
+        semgrepService: new FreshSemgrepService(),
+        ragService,
+        codeContextService: new FreshCodeContextService(),
+        codeSearchService: new FreshCodeSearchService(),
+        prisma
+      });
+
+      const result = await orchestrator.analyzePastedCode({
+        language: 'javascript',
+        code: "function getUser(db, req, res) {\n  db.query(\"SELECT * FROM users WHERE id = '\" + req.query.id + \"'\");\n}\n"
+      });
+
+      // The timeout must NOT silently erase the already-classified finding,
+      // and must NEVER upgrade it to CONFIRMED just because time ran out.
+      expect(result.vulnerabilities).toHaveLength(0);
+      expect(result.uncertainFindings).toHaveLength(1);
+      expect(result.uncertainFindings[0].id).toBe('F1');
+      expect(result.uncertainFindings[0].verification.status).toBe('UNVERIFIED');
+      expect(result.partial).toBe(true);
+      expect(result.analysisStatus).toBe('PARTIAL');
+    } finally {
+      process.env.AGENT_MAX_ANALYSIS_TIME_MS = originalTimeout;
+      jest.resetModules();
+    }
   }, 30000);
 });

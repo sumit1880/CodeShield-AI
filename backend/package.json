@@ -22,7 +22,6 @@
   },
   "dependencies": {
     "@google/genai": "^2.20.0",
-    "@google/generative-ai": "^0.21.0",
     "@prisma/client": "^5.20.0",
     "adm-zip": "^0.5.16",
     "cors": "^2.8.5",

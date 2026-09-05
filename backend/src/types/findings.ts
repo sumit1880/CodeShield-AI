@@ -1,10 +1,16 @@
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
 /**
- * 'UNCERTAIN' is an internal verdict only: it tells the Manager Agent more
- * evidence is needed and is never persisted or returned to the API — only
- * CONFIRMED findings ever reach VulnerabilityResponse/the database.
+ * 'CONFIRMED' / 'REJECTED' / 'UNCERTAIN' are the Verification Agent's own
+ * verdicts (UNCERTAIN tells the Manager more evidence is needed). 'UNVERIFIED'
+ * is a code-assigned status (never produced by the LLM) applied at
+ * finalization time to a classified finding that the pipeline ran out of
+ * budget to verify at all (e.g. the global analysis timeout was hit before
+ * VERIFY_FINDING could run on it). Only CONFIRMED findings ever ship as
+ * VulnerabilityResponse/persist to the database; UNCERTAIN and UNVERIFIED
+ * ship separately as "uncertain findings" so a timeout never silently
+ * erases already-classified work.
  */
-export type VerificationStatus = 'CONFIRMED' | 'REJECTED' | 'UNCERTAIN';
+export type VerificationStatus = 'CONFIRMED' | 'REJECTED' | 'UNCERTAIN' | 'UNVERIFIED';
 
 export interface SemgrepFinding {
   ruleId: string;
@@ -58,15 +64,15 @@ export interface VerificationResult {
 }
 
 /**
- * The only verdicts that ever ship to the API/DB. 'UNCERTAIN' is filtered
- * out in the orchestrator before a finding becomes a VulnerabilityResponse,
- * so this narrower type keeps that guarantee checked by the compiler (and
- * matches the persisted Prisma enum, which has no UNCERTAIN value).
+ * The only verdict that ever ships as a VulnerabilityResponse / persists to
+ * the database. REJECTED findings are dropped entirely; UNCERTAIN and
+ * UNVERIFIED findings ship separately (see UncertainFindingResponse) so
+ * this narrower type keeps the "never falsely confirm" guarantee checked
+ * by the compiler, matching the persisted Prisma enum.
  */
-export type ShippedVerificationStatus = Exclude<VerificationStatus, 'UNCERTAIN'>;
+export type ShippedVerificationStatus = 'CONFIRMED';
 
-/** Final, client-facing shape of a single vulnerability. */
-export interface VulnerabilityResponse {
+interface BaseFindingResponse {
   id: string;
   title: string;
   cwe: { id: string; name: string };
@@ -80,9 +86,28 @@ export interface VulnerabilityResponse {
   };
   explanation: string;
   recommendation: string;
+}
+
+/** Final, client-facing shape of a single confirmed vulnerability. */
+export interface VulnerabilityResponse extends BaseFindingResponse {
   verification: {
     status: ShippedVerificationStatus;
     confidence: number;
+  };
+}
+
+/**
+ * A classified finding that could not be safely reported as either
+ * CONFIRMED or REJECTED — either the Verification Agent itself was unsure
+ * (UNCERTAIN) or the analysis ran out of budget before verifying it at all
+ * (UNVERIFIED). Returned to the client separately from `vulnerabilities` so
+ * a timeout never looks identical to "no vulnerabilities found".
+ */
+export interface UncertainFindingResponse extends BaseFindingResponse {
+  verification: {
+    status: Extract<VerificationStatus, 'UNCERTAIN' | 'UNVERIFIED'>;
+    confidence: number;
+    reason?: string;
   };
 }
 

@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 import { env } from '../../config/env';
 import { ApiError, ErrorCode } from '../../utils/errors';
 import { logger } from '../../utils/logger';
@@ -37,29 +37,30 @@ function isServerError(err: any): boolean {
 }
 
 export class GeminiService implements LlmService {
-  private client: GoogleGenerativeAI;
+  private client: GoogleGenAI;
 
   constructor(apiKey: string = env.gemini.apiKey) {
-    this.client = new GoogleGenerativeAI(apiKey);
+    this.client = new GoogleGenAI({ apiKey });
   }
 
   async generate(request: LlmRequest): Promise<LlmResponse> {
-    const model = this.client.getGenerativeModel({
-      model: env.gemini.model,
-      systemInstruction: request.systemPrompt,
-      generationConfig: request.jsonMode ? { responseMimeType: 'application/json' } : undefined
-    });
-
     const maxAttempts = env.ai.maxRetries + 1;
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const result = await withTimeout(
-          model.generateContent(request.userPrompt),
+        const response = await withTimeout(
+          this.client.models.generateContent({
+            model: env.gemini.model,
+            contents: request.userPrompt,
+            config: {
+              systemInstruction: request.systemPrompt,
+              ...(request.jsonMode ? { responseMimeType: 'application/json' } : {})
+            }
+          }),
           env.ai.requestTimeoutMs
         );
-        const text = result.response.text();
+        const text = response.text ?? '';
         return { text };
       } catch (err) {
         lastError = err;

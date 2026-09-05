@@ -58,6 +58,38 @@ module.exports = { hashPassword };
   }
 };
 
+/**
+ * A single file combining SQL injection, XSS, command injection, path
+ * traversal, a hardcoded secret, and weak randomness — used by the
+ * REQUIRED TEST scenario (multiple simultaneous vulnerabilities, matching
+ * the shape of the code that triggered the production zero-findings bug).
+ */
+export const MULTI_VULN_SNIPPET = {
+  language: 'javascript',
+  code: `const password = "admin123";
+
+app.get("/user", (req, res) => {
+  const username = req.query.username;
+  const query = \`SELECT * FROM users WHERE name = '\${username}'\`;
+  res.send(query);
+});
+
+app.get("/search", (req, res) => {
+  res.send(\`<h1>\${req.query.q}</h1>\`);
+});
+
+app.get("/ping", (req, res) => {
+  exec(\`ping \${req.query.host}\`);
+});
+
+app.get("/file", (req, res) => {
+  res.send(fs.readFileSync(\`/tmp/\${req.query.file}\`));
+});
+
+const token = Math.random().toString(36);
+`
+};
+
 export const CLEAN_SNIPPET = {
   language: 'javascript',
   code: `function add(a, b) {
