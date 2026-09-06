@@ -1,8 +1,8 @@
 /**
  * Provider-agnostic LLM interface. Agents depend on this interface, not on
- * Gemini directly, so the provider can be swapped/mocked easily (this is
- * also what makes the orchestrator/agent tests independent of a real API
- * key: tests inject a fake implementation of this interface).
+ * any specific provider, so providers can be swapped/mocked/fallen-back-on
+ * easily (this is also what makes agent/orchestrator tests independent of
+ * any real API key: tests inject a fake implementation of this interface).
  */
 export interface LlmRequest {
   systemPrompt: string;
@@ -13,8 +13,24 @@ export interface LlmRequest {
 
 export interface LlmResponse {
   text: string;
+  /** Which provider actually produced this response. Optional so existing
+   *  callers/tests that only read `.text` are unaffected. */
+  provider?: string;
+  model?: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+  };
 }
 
 export interface LlmService {
   generate(request: LlmRequest): Promise<LlmResponse>;
+}
+
+/** An LlmService that also identifies itself, so a router can log which
+ *  provider handled/failed a request without each provider hard-coding
+ *  logging concerns. */
+export interface LlmProvider extends LlmService {
+  readonly name: string;
+  readonly model: string;
 }

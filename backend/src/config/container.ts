@@ -1,5 +1,5 @@
 import { getPrismaClient } from '../config/prisma';
-import { GeminiService } from '../services/llm/gemini.service';
+import { buildLlmService } from '../services/llm/llm-factory';
 import { GeminiEmbeddingService } from '../services/embeddings/gemini-embedding.service';
 import { SemgrepService } from '../services/semgrep/semgrep.service';
 import { RagService } from '../services/rag/rag.service';
@@ -18,7 +18,13 @@ import { ZipService } from '../services/zip/zip.service';
  * with mocked agents/services instead of using this factory.
  */
 export function buildContainer() {
-  const llm = new GeminiService();
+  // Gemini -> Grok -> Llama fallback chain (order configurable via
+  // LLM_PROVIDER_ORDER). Agents depend on the LlmService interface only, so
+  // they never know whether a single provider or the router is underneath.
+  const llm = buildLlmService();
+  // Embeddings (RAG knowledge base) intentionally stay Gemini-only: no
+  // fallback need was requested for embeddings, and keeping this simple
+  // avoids needless complexity on a free-tier deployment.
   const embeddings = new GeminiEmbeddingService();
   const prisma = getPrismaClient();
 

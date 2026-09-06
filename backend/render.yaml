@@ -14,6 +14,18 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: gemini-3.6-flash
+      - key: GROK_API_KEY
+        sync: false
+      - key: GROK_MODEL
+        sync: false
+      - key: LLAMA_API_KEY
+        sync: false
+      - key: LLAMA_BASE_URL
+        sync: false
+      - key: LLAMA_MODEL
+        sync: false
+      - key: LLM_PROVIDER_ORDER
+        value: gemini,grok,llama
       - key: EMBEDDING_MODEL
         value: text-embedding-004
       - key: DATABASE_URL
@@ -22,6 +34,18 @@ services:
         sync: false
       - key: SEMGREP_PATH
         value: semgrep
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "60000"
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: "30"
+      - key: MAX_CONCURRENT_ANALYSES
+        value: "3"
+      - key: AI_REQUEST_TIMEOUT_MS
+        value: "20000"
+      - key: AI_MAX_RETRIES
+        value: "1"
       - key: AGENT_MAX_ANALYSIS_TIME_MS
         value: "120000"
       - key: AGENT_MAX_ITERATIONS

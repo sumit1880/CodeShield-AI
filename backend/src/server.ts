@@ -1,7 +1,12 @@
 import { createApp } from './app';
-import { env } from './config/env';
+import { env, validateStartupConfig } from './config/env';
 import { logger } from './utils/logger';
 import { SemgrepService } from './services/semgrep/semgrep.service';
+
+// Fails fast with a clear message if required configuration (an LLM
+// provider, Google OAuth client ID) is missing, instead of accepting
+// traffic and failing confusingly on the first request.
+validateStartupConfig();
 
 const app = createApp();
 
