@@ -40,6 +40,15 @@ export const env = {
     model: process.env.GEMINI_MODEL || 'gemini-3.6-flash'
   },
 
+  // Second Gemini account, used as a fallback when the primary key hits a
+  // free-tier rate limit/outage. Falls back to GEMINI_MODEL if
+  // GEMINI_MODEL_2 isn't set, since it's usually the same model on a
+  // different account.
+  gemini2: {
+    apiKey: process.env.GEMINI_API_KEY_2 || '',
+    model: process.env.GEMINI_MODEL_2 || process.env.GEMINI_MODEL || 'gemini-3.6-flash'
+  },
+
   embeddingModel: process.env.EMBEDDING_MODEL || 'text-embedding-004',
 
   limits: {
@@ -56,8 +65,8 @@ export const env = {
 
   // Per-provider-attempt timeout/retry budget. Kept intentionally small
   // (relative to AGENT_MAX_ANALYSIS_TIME_MS) because a single logical LLM
-  // call may now try up to 3 providers (Gemini -> Grok -> Llama) in
-  // sequence, and free-tier provider quotas mean retries are not free.
+  // call may try multiple providers in sequence, and free-tier provider
+  // quotas mean retries are not free.
   ai: {
     requestTimeoutMs: intEnv('AI_REQUEST_TIMEOUT_MS', 20000),
     maxRetries: intEnv('AI_MAX_RETRIES', 1)
@@ -73,7 +82,7 @@ export const env = {
   // unless LLM_PROVIDER_ORDER says otherwise; providers with missing
   // required config are simply skipped (not treated as a failure).
   llm: {
-    providerOrder: listEnv('LLM_PROVIDER_ORDER', ['gemini', 'grok', 'llama']),
+    providerOrder: listEnv('LLM_PROVIDER_ORDER', ['gemini', 'gemini2']),
     grok: {
       apiKey: process.env.GROK_API_KEY || '',
       model: process.env.GROK_MODEL || ''
@@ -108,6 +117,10 @@ function isGeminiConfigured(): boolean {
   return Boolean(env.gemini.apiKey);
 }
 
+function isGemini2Configured(): boolean {
+  return Boolean(env.gemini2.apiKey);
+}
+
 function isGrokConfigured(): boolean {
   return Boolean(env.llm.grok.apiKey && env.llm.grok.model);
 }
@@ -122,6 +135,8 @@ export function isProviderConfigured(name: string): boolean {
   switch (name) {
     case 'gemini':
       return isGeminiConfigured();
+    case 'gemini2':
+      return isGemini2Configured();
     case 'grok':
       return isGrokConfigured();
     case 'llama':
@@ -143,7 +158,7 @@ export function validateStartupConfig(): void {
   const configuredProviders = env.llm.providerOrder.filter(isProviderConfigured);
   if (configuredProviders.length === 0) {
     problems.push(
-      'No LLM provider is configured. Set at least one of: GEMINI_API_KEY, ' +
+      'No LLM provider is configured. Set at least one of: GEMINI_API_KEY, GEMINI_API_KEY_2, ' +
         '(GROK_API_KEY + GROK_MODEL), or (LLAMA_BASE_URL + LLAMA_MODEL).'
     );
   }

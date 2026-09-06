@@ -21,13 +21,18 @@ function isServerError(err: any): boolean {
 }
 
 export class GeminiService implements LlmProvider {
-  readonly name = 'gemini';
+  readonly name: string;
   readonly model: string;
   private client: GoogleGenAI;
 
-  constructor(apiKey: string = env.gemini.apiKey, model: string = env.gemini.model) {
+  constructor(
+    apiKey: string = env.gemini.apiKey,
+    model: string = env.gemini.model,
+    name: string = 'gemini'
+  ) {
     this.client = new GoogleGenAI({ apiKey });
     this.model = model;
+    this.name = name;
   }
 
   async generate(request: LlmRequest): Promise<LlmResponse> {
@@ -46,7 +51,7 @@ export class GeminiService implements LlmProvider {
             }
           }),
           env.ai.requestTimeoutMs,
-          'Gemini request'
+          `${this.name} request`
         );
         const text = response.text ?? '';
         const usageMeta = (response as any).usageMetadata;
@@ -70,20 +75,20 @@ export class GeminiService implements LlmProvider {
 
         if (isRateLimitError(err)) {
           if (attempt >= maxAttempts) {
-            throw new ApiError(ErrorCode.AI_RATE_LIMIT, 'Gemini API rate limit exceeded');
+            throw new ApiError(ErrorCode.AI_RATE_LIMIT, `${this.name} API rate limit exceeded`);
           }
           const backoffMs = 500 * 2 ** (attempt - 1);
-          logger.warn({ provider: this.name, attempt, backoffMs }, 'Gemini rate limited, backing off');
+          logger.warn({ provider: this.name, attempt, backoffMs }, `${this.name} rate limited, backing off`);
           await sleep(backoffMs);
           continue;
         }
 
         if (isServerError(err)) {
           if (attempt >= maxAttempts) {
-            throw new ApiError(ErrorCode.AI_PROVIDER_ERROR, 'Gemini API server error');
+            throw new ApiError(ErrorCode.AI_PROVIDER_ERROR, `${this.name} API server error`);
           }
           const backoffMs = 500 * 2 ** (attempt - 1);
-          logger.warn({ provider: this.name, attempt, backoffMs }, 'Gemini server error, retrying');
+          logger.warn({ provider: this.name, attempt, backoffMs }, `${this.name} server error, retrying`);
           await sleep(backoffMs);
           continue;
         }
@@ -91,14 +96,14 @@ export class GeminiService implements LlmProvider {
         // Unknown/non-retryable error class.
         throw new ApiError(
           ErrorCode.AI_PROVIDER_ERROR,
-          `Gemini API request failed: ${(err as Error)?.message || 'unknown error'}`
+          `${this.name} API request failed: ${(err as Error)?.message || 'unknown error'}`
         );
       }
     }
 
     throw new ApiError(
       ErrorCode.AI_PROVIDER_ERROR,
-      `Gemini API request failed after ${maxAttempts} attempts: ${
+      `${this.name} API request failed after ${maxAttempts} attempts: ${
         (lastError as Error)?.message || 'unknown error'
       }`
     );

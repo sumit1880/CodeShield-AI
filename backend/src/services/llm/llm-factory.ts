@@ -14,7 +14,11 @@ const XAI_BASE_URL = 'https://api.x.ai/v1';
 function buildProvider(name: string): LlmProvider | null {
   switch (name) {
     case 'gemini':
-      return isProviderConfigured('gemini') ? new GeminiService() : null;
+      return isProviderConfigured('gemini') ? new GeminiService(env.gemini.apiKey, env.gemini.model, 'gemini') : null;
+    case 'gemini2':
+      return isProviderConfigured('gemini2')
+        ? new GeminiService(env.gemini2.apiKey, env.gemini2.model, 'gemini2')
+        : null;
     case 'grok':
       return isProviderConfigured('grok')
         ? new GenericOpenAiProvider({
@@ -41,17 +45,19 @@ function buildProvider(name: string): LlmProvider | null {
 
 /**
  * Builds the LLM service used by all agents, honoring LLM_PROVIDER_ORDER
- * (Gemini first by default). Providers missing required config are skipped
- * silently — only providers that are actually configured take part in the
- * fallback chain. Throws if none are configured (callers should validate
- * this at startup instead of at first request — see env.validateStartupConfig).
+ * (Gemini first by default; a second Gemini account can serve as a
+ * fallback for free-tier rate limits — see env.gemini2). Providers missing
+ * required config are skipped silently — only providers that are actually
+ * configured take part in the fallback chain. Throws if none are
+ * configured (callers should validate this at startup instead of at first
+ * request — see env.validateStartupConfig).
  */
 export function buildLlmService(): LlmService {
   const providers = env.llm.providerOrder.map(buildProvider).filter((p): p is LlmProvider => p !== null);
 
   if (providers.length === 0) {
     throw new Error(
-      'No LLM provider configured. Set GEMINI_API_KEY, or GROK_API_KEY+GROK_MODEL, or LLAMA_BASE_URL+LLAMA_MODEL.'
+      'No LLM provider configured. Set GEMINI_API_KEY, or GEMINI_API_KEY_2, or GROK_API_KEY+GROK_MODEL, or LLAMA_BASE_URL+LLAMA_MODEL.'
     );
   }
 
