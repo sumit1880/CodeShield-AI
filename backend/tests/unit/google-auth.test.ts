@@ -70,4 +70,13 @@ describe('googleAuth middleware', () => {
     expect(next).toHaveBeenCalledWith();
     expect(req.user).toEqual({ id: 'google-user-123', email: 'dev@example.com' });
   });
+
+  it('rejects a token whose email is not verified', async () => {
+    const middleware = buildGoogleAuthMiddleware(
+      async () => ({ sub: 'u1', email: 'a@b.com', email_verified: false } as any)
+    );
+    const next = jest.fn();
+    await middleware({ headers: { authorization: 'Bearer t' } } as any, {} as any, next);
+    expect(next.mock.calls[0][0]).toMatchObject({ code: 'UNAUTHORIZED' });
+  });
 });
