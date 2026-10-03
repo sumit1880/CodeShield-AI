@@ -102,7 +102,7 @@ export const verificationResultSchema = z.object({
   id: z.string().min(1),
   status: verificationStatusSchema,
   confidence: z.number().min(0).max(1),
-  reason: z.string().min(1)
+  reason: z.string()
 });
 
 export const verificationOutputSchema = z.object({

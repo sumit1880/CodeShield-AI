@@ -124,7 +124,8 @@ export function createToolRegistry(deps: ToolRegistryDeps, ctx: ToolContext): Re
       const verification = await deps.verificationAgent.run({
         language: ctx.language,
         sourceCode: ctx.getSourceView(),
-        findings: pending
+        findings: pending,
+        semgrepFindings: state.semgrepFindings
       });
       for (const v of verification.findings) state.verifiedById.set(v.id, v);
       return { resultSummary: `Verified ${verification.findings.length} finding(s).` };
@@ -142,7 +143,8 @@ export function createToolRegistry(deps: ToolRegistryDeps, ctx: ToolContext): Re
       const verification = await deps.verificationAgent.run({
         language: ctx.language,
         sourceCode: ctx.getSourceView(),
-        findings: targets
+        findings: targets,
+        semgrepFindings: state.semgrepFindings
       });
       for (const v of verification.findings) state.verifiedById.set(v.id, v);
       return { resultSummary: `Reanalyzed ${verification.findings.length} previously uncertain finding(s).` };

@@ -378,8 +378,32 @@ export class AnalysisOrchestrator {
       if (verdict?.status === 'CONFIRMED') {
         vulnerabilities.push({ ...base, verification: { status: 'CONFIRMED', confidence: verdict.confidence } });
       } else if (verdict?.status === 'REJECTED') {
-        // Verified and explicitly rejected: never reported as a vulnerability.
-        rejectedCount++;
+        // Semgrep findings with severity ERROR are a floor:
+        // the verifier may mark them UNCERTAIN but not silently REJECTED without a stored reason.
+        const isSemgrepError = state.semgrepFindings.some((sf) => {
+          if (sf.severity?.toUpperCase() !== 'ERROR') return false;
+          const fileMatch =
+            sf.file === finding.location.file ||
+            path.normalize(sf.file) === path.normalize(finding.location.file) ||
+            sf.file.endsWith(finding.location.file) ||
+            finding.location.file.endsWith(sf.file);
+          if (!fileMatch) return false;
+          return Math.max(sf.lineStart, finding.location.lineStart) <= Math.min(sf.lineEnd, finding.location.lineEnd);
+        });
+
+        if (isSemgrepError && (!verdict.reason || !verdict.reason.trim())) {
+          uncertainFindings.push({
+            ...base,
+            verification: {
+              status: 'UNCERTAIN',
+              confidence: verdict.confidence,
+              reason: 'Semgrep ERROR finding cannot be silently REJECTED without a stored reason'
+            }
+          });
+        } else {
+          // Verified and explicitly rejected: never reported as a vulnerability.
+          rejectedCount++;
+        }
       } else if (verdict?.status === 'UNCERTAIN') {
         // The Verification Agent itself could not confirm or reject it.
         uncertainFindings.push({ ...base, verification: { status: 'UNCERTAIN', confidence: verdict.confidence, reason: verdict.reason } });
