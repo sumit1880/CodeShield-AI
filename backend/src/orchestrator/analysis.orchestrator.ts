@@ -117,7 +117,7 @@ export class AnalysisOrchestrator {
       const filePath = path.join(tempDir, `submission${ext}`);
       await fs.writeFile(filePath, code, 'utf-8');
 
-      const semgrepFindings = await this.runSemgrepSafely(tempDir, language, 'server.js');
+      const semgrepFindings = await this.runSemgrepSafely(tempDir, language);
       const submissionFile = 'submission' + ext;
 
       const result = await this.runAgenticPipeline({
@@ -171,10 +171,7 @@ export class AnalysisOrchestrator {
       throw new ApiError(ErrorCode.UNSUPPORTED_LANGUAGE, 'The selected language is not currently supported.');
     }
 
-    const semgrepFindings = await this.deps.semgrepService.scan({
-      targetDir: projectRoot,
-      language: language === 'auto' ? 'auto' : language
-    });
+    const semgrepFindings = await this.runSemgrepSafely(projectRoot, language === 'auto' ? 'auto' : language);
 
     // Relative-ize semgrep file paths against the project root.
     const normalizedFindings: SemgrepFinding[] = semgrepFindings.map((f) => ({
@@ -200,7 +197,7 @@ export class AnalysisOrchestrator {
 
     const analysisId = await this.persist({
       language: effectiveLanguage,
-      codeHash: hashCode(relevantFiles.map((f) => f.relativePath).join('|')),
+      codeHash: await this.hashProject(relevantFiles),
       sourceType: 'ZIP',
       durationMs: Date.now() - startedAt,
       vulnerabilities: result.vulnerabilities
@@ -408,7 +405,7 @@ export class AnalysisOrchestrator {
     return { vulnerabilities, uncertainFindings, rejectedCount, partial };
   }
 
-  private async runSemgrepSafely(dir: string, language: string, _hint: string): Promise<SemgrepFinding[]> {
+  private async runSemgrepSafely(dir: string, language: string): Promise<SemgrepFinding[]> {
     try {
       return await this.deps.semgrepService.scan({ targetDir: dir, language });
     } catch (err) {
@@ -462,6 +459,20 @@ export class AnalysisOrchestrator {
       // the caller if the DB is temporarily unavailable in this prototype.
       return crypto.randomUUID();
     }
+  }
+
+  /** Hash of paths + contents, so two different projects with the same file names don't collide. */
+  private async hashProject(files: Array<{ relativePath: string; absolutePath: string }>): Promise<string> {
+    const h = crypto.createHash('sha256');
+    for (const f of [...files].sort((a, b) => a.relativePath.localeCompare(b.relativePath))) {
+      h.update(f.relativePath);
+      try {
+        h.update(await fs.readFile(f.absolutePath));
+      } catch {
+        // unreadable file: path alone still goes into the hash
+      }
+    }
+    return h.digest('hex');
   }
 
   private validatePastedCode(language: string, code: string) {
