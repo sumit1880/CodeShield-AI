@@ -8,6 +8,9 @@ import { RawSemgrepOutput } from './semgrep.types';
 
 const SEMGREP_RULES_DIR = path.join(__dirname, '..', '..', '..', 'semgrep-rules');
 const SEMGREP_TIMEOUT_MS = 60_000;
+// Used when we don't have our own rule file for a language. "auto" needs
+// metrics turned on, so use a registry pack instead.
+const FALLBACK_CONFIG = 'p/security-audit';
 
 function runSemgrep(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -28,9 +31,9 @@ function runSemgrep(args: string[], cwd: string): Promise<string> {
           // We still attempt to parse stdout since semgrep may emit partial
           // valid JSON with a non-fatal exit code alongside `errors`.
           if (!stdout) {
-            return reject(
-              new ApiError(ErrorCode.SEMGREP_ERROR, `Semgrep failed: ${stderr || error.message}`)
-            );
+            // stderr can contain server paths, so keep it in the logs only
+            logger.error({ stderr: String(stderr).slice(0, 2000) }, 'Semgrep failed');
+            return reject(new ApiError(ErrorCode.SEMGREP_ERROR, 'Static analysis step failed'));
           }
         }
         resolve(stdout);
@@ -75,9 +78,9 @@ export class SemgrepService {
     const { targetDir, language } = options;
 
     const languageRuleFile = path.join(SEMGREP_RULES_DIR, `${language}.yml`);
-    const configArg = (await this.ruleFileExists(languageRuleFile)) ? languageRuleFile : 'auto';
+    const configArg = (await this.ruleFileExists(languageRuleFile)) ? languageRuleFile : FALLBACK_CONFIG;
 
-    const args = ['--json', '--quiet', '--config', configArg, '--timeout', '30', targetDir];
+    const args = ['--json', '--quiet', '--metrics=off', '--config', configArg, '--timeout', '30', targetDir];
 
     logger.info({ language, configArg }, 'Running semgrep scan');
 
