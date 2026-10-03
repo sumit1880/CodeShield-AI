@@ -5,6 +5,9 @@ import { env } from '../../config/env';
 import { ApiError, ErrorCode } from '../../utils/errors';
 import { logger } from '../../utils/logger';
 
+/** Config files that change what Semgrep scans; an upload must not be able to bring its own. */
+const SCAN_CONTROL_FILES = new Set(['.semgrepignore', '.gitignore']);
+
 /** Extensions that are never written to disk during extraction. */
 const DANGEROUS_EXTENSIONS = new Set([
   '.exe', '.dll', '.so', '.dylib', '.bat', '.cmd', '.sh', '.ps1', '.msi', '.app', '.bin'
@@ -85,12 +88,18 @@ export class ZipService {
 
     const resolvedRoot = path.resolve(targetDir);
     const extracted: ExtractedFile[] = [];
+    let actualBytes = 0;
 
     for (const entry of entries) {
       if (entry.isDirectory) continue;
 
       const entryName = entry.entryName;
       const destPath = resolveSafeEntryPath(resolvedRoot, entryName);
+
+      if (SCAN_CONTROL_FILES.has(path.basename(entryName).toLowerCase())) {
+        logger.warn({ entryName }, 'Skipping scan-control file during extraction');
+        continue;
+      }
 
       const ext = path.extname(entryName).toLowerCase();
       if (DANGEROUS_EXTENSIONS.has(ext)) {
@@ -100,6 +109,16 @@ export class ZipService {
 
       await fs.mkdir(path.dirname(destPath), { recursive: true });
       const data = entry.getData();
+
+      // header.size is whatever the archive claims, so count what we really got
+      actualBytes += data.length;
+      if (actualBytes > maxExtractedBytes) {
+        throw new ApiError(
+          ErrorCode.ARCHIVE_TOO_LARGE,
+          `Extracted content exceeds ${env.limits.maxExtractedSizeMb}MB limit`
+        );
+      }
+
       await fs.writeFile(destPath, data);
 
       extracted.push({ relativePath: entryName, absolutePath: destPath, size: data.length });
