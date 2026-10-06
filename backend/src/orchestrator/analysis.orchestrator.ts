@@ -34,12 +34,14 @@ export interface OrchestratorDeps {
 export interface AnalyzePastedCodeInput {
   language: string;
   code: string;
+  signal?: AbortSignal;
 }
 
 export interface AnalyzeProjectInput {
   language: string; // may be 'auto'
   files: Array<{ relativePath: string; absolutePath: string }>;
   projectRoot: string;
+  signal?: AbortSignal;
 }
 
 export interface AnalysisSummary {
@@ -107,7 +109,10 @@ export class AnalysisOrchestrator {
   constructor(private deps: OrchestratorDeps) {}
 
   async analyzePastedCode(input: AnalyzePastedCodeInput): Promise<AnalysisResult> {
-    const { language, code } = input;
+    const { language, code, signal } = input;
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Aborted');
+    }
 
     this.validatePastedCode(language, code);
 
@@ -117,6 +122,10 @@ export class AnalysisOrchestrator {
       const filePath = path.join(tempDir, `submission${ext}`);
       await fs.writeFile(filePath, code, 'utf-8');
 
+      if (signal?.aborted) {
+        throw signal.reason ?? new Error('Aborted');
+      }
+
       const semgrepFindings = await this.runSemgrepSafely(tempDir, language);
       const submissionFile = 'submission' + ext;
 
@@ -125,7 +134,8 @@ export class AnalysisOrchestrator {
         sourceCode: code,
         semgrepFindings: semgrepFindings.map((f) => ({ ...f, file: submissionFile })),
         projectRoot: tempDir,
-        files: [submissionFile]
+        files: [submissionFile],
+        signal
       });
 
       const analysisId = await this.persist({
@@ -150,7 +160,10 @@ export class AnalysisOrchestrator {
 
   async analyzeProject(input: AnalyzeProjectInput): Promise<AnalysisResult> {
     const startedAt = Date.now();
-    const { language, files, projectRoot } = input;
+    const { language, files, projectRoot, signal } = input;
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Aborted');
+    }
 
     const relevantFiles = this.deps.codeContextService.filterRelevantFiles(
       files.map((f) => ({ relativePath: f.relativePath, absolutePath: f.absolutePath, size: 0 }))
@@ -192,7 +205,8 @@ export class AnalysisOrchestrator {
       sourceCode: sourceView || '// No Semgrep findings to provide context for.',
       semgrepFindings: normalizedFindings,
       projectRoot,
-      files: relevantFiles.map((f) => f.relativePath)
+      files: relevantFiles.map((f) => f.relativePath),
+      signal
     });
 
     const analysisId = await this.persist({
@@ -231,8 +245,9 @@ export class AnalysisOrchestrator {
     semgrepFindings: SemgrepFinding[];
     projectRoot: string;
     files: string[];
+    signal?: AbortSignal;
   }): Promise<FinalizedFindings> {
-    const { language, sourceCode, semgrepFindings, projectRoot, files } = params;
+    const { language, sourceCode, semgrepFindings, projectRoot, files, signal } = params;
 
     const state: AnalysisState = {
       goal: 'Identify, classify, and verify real security vulnerabilities in the submitted code.',
@@ -262,6 +277,7 @@ export class AnalysisOrchestrator {
       {
         projectRoot,
         language,
+        signal,
         getSourceView: () =>
           state.evidence.length === 0
             ? sourceCode
@@ -275,6 +291,11 @@ export class AnalysisOrchestrator {
     let stopReason: 'FINISHED' | 'MAX_ITERATIONS' | 'MAX_TOOL_CALLS' | 'TIMEOUT' = 'FINISHED';
 
     while (state.status === 'RUNNING') {
+      if (signal?.aborted) {
+        logger.info('[Agent] Analysis aborted by client disconnect');
+        throw signal.reason ?? new Error('Aborted');
+      }
+
       state.iteration++;
 
       if (state.iteration > env.agent.maxIterations) {
@@ -300,7 +321,7 @@ export class AnalysisOrchestrator {
       // The Manager is only consulted for genuinely open choices: whether/how
       // to detect, how to investigate an UNCERTAIN finding, or when to FINISH.
       const forced = this.nextDeterministicAction(state);
-      const decision: ManagerDecision = forced ?? (await this.deps.managerAgent.decide(state));
+      const decision: ManagerDecision = forced ?? (await this.deps.managerAgent.decide(state, signal));
 
       if (!forced) {
         logger.info({ action: decision.action, reason: decision.reason }, `[Agent] Decision: ${decision.action}`);

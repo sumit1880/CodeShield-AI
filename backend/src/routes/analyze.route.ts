@@ -30,6 +30,18 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
 
   router.post('/analyze', async (req, res, next) => {
     const requestId = (req as RequestWithId).requestId;
+    const abortController = new AbortController();
+    let finished = false;
+
+    res.on('finish', () => {
+      finished = true;
+    });
+    res.on('close', () => {
+      if (!finished && !res.writableEnded) {
+        abortController.abort();
+      }
+    });
+
     try {
       const parsed = analyzeRequestSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -40,13 +52,19 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
 
       const result = await container.orchestrator.analyzePastedCode({
         language: parsed.data.language,
-        code: parsed.data.code
+        code: parsed.data.code,
+        signal: abortController.signal
       });
 
+      finished = true;
       logger.info({ requestId, analysisId: result.id, status: result.analysisStatus }, '[Analysis] Completed');
 
       res.json({ success: true, analysis: toApiShape(result) });
     } catch (err) {
+      if (abortController.signal.aborted) {
+        logger.info({ requestId }, '[Analysis] Aborted by client disconnect');
+        return;
+      }
       logger.warn({ requestId, err: err instanceof Error ? err.message : 'unknown' }, '[Analysis] Failed');
       next(err);
     }
@@ -54,6 +72,18 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
 
   router.post('/analyze/upload', zipUpload, async (req, res, next) => {
     const requestId = (req as RequestWithId).requestId;
+    const abortController = new AbortController();
+    let finished = false;
+
+    res.on('finish', () => {
+      finished = true;
+    });
+    res.on('close', () => {
+      if (!finished && !res.writableEnded) {
+        abortController.abort();
+      }
+    });
+
     try {
       if (!req.file) {
         throw new ApiError(ErrorCode.INVALID_REQUEST, 'No file uploaded (expected multipart field "file")');
@@ -65,6 +95,10 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
       logger.info({ requestId, language, sourceType: 'ZIP', sizeBytes: req.file.size }, '[Analysis] Started');
 
       const result = await withTempDir(async (tempDir) => {
+        if (abortController.signal.aborted) {
+          throw abortController.signal.reason ?? new Error('Aborted');
+        }
+
         const extracted = await container.zipService.safeExtract(req.file!.buffer, tempDir);
 
         if (extracted.length === 0) {
@@ -74,14 +108,20 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
         return container.orchestrator.analyzeProject({
           language,
           files: extracted.map((f) => ({ relativePath: f.relativePath, absolutePath: f.absolutePath })),
-          projectRoot: tempDir
+          projectRoot: tempDir,
+          signal: abortController.signal
         });
       });
 
+      finished = true;
       logger.info({ requestId, analysisId: result.id, status: result.analysisStatus }, '[Analysis] Completed');
 
       res.json({ success: true, analysis: toApiShape(result) });
     } catch (err) {
+      if (abortController.signal.aborted) {
+        logger.info({ requestId }, '[Analysis] Aborted by client disconnect');
+        return;
+      }
       logger.warn({ requestId, err: err instanceof Error ? err.message : 'unknown' }, '[Analysis] Failed');
       next(err);
     }

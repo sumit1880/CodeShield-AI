@@ -1,64 +1,103 @@
-import request from 'supertest';
-import { createApp } from '../../src/app';
 import { buildConcurrencyLimiter } from '../../src/middleware/concurrency';
+import { Request, Response, NextFunction } from 'express';
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
-  });
-  return { promise, resolve };
+/** Create a minimal mock req/res/next triple. */
+function mockContext() {
+  const events: Record<string, Array<() => void>> = {};
+  const res = {
+    on(event: string, fn: () => void) {
+      (events[event] = events[event] ?? []).push(fn);
+      return this;
+    },
+    emit(event: string) {
+      (events[event] ?? []).forEach((fn) => fn());
+    }
+  } as unknown as Response;
+  const req = {} as Request;
+  const next: NextFunction & { calls: Array<unknown> } = Object.assign(
+    (arg?: unknown) => { next.calls.push(arg); },
+    { calls: [] as Array<unknown> }
+  );
+  return { req, res, next };
 }
 
-describe('MAX_CONCURRENT_ANALYSES limiter', () => {
-  it('rejects a request that arrives while another is still in flight', async () => {
-    const first = deferred<any>();
+describe('buildConcurrencyLimiter', () => {
+  it('allows the first request through', () => {
+    const limiter = buildConcurrencyLimiter(1);
+    const { req, res, next } = mockContext();
+    limiter(req, res, next);
+    expect(next.calls).toHaveLength(1);
+    expect(next.calls[0]).toBeUndefined(); // no error
+  });
 
-    const orchestrator = {
-      analyzePastedCode: jest
-        .fn()
-        // First call hangs until we resolve it manually; a second call (if
-        // it ever ran) would resolve immediately — but it must never run
-        // while the limit is exhausted.
-        .mockImplementationOnce(() => first.promise)
-        .mockResolvedValue({
-          id: 'a2',
-          language: 'javascript',
-          summary: { totalIssues: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 },
-          vulnerabilities: []
-        }),
-      analyzeProject: jest.fn()
-    } as any;
-    const container = { orchestrator, zipService: { safeExtract: jest.fn() } as any, prisma: {} as any };
+  it('rejects a second concurrent request when limit is 1', () => {
+    const limiter = buildConcurrencyLimiter(1);
+    const ctx1 = mockContext();
+    const ctx2 = mockContext();
 
-    const app = createApp(container, {
-      authMiddleware: (_req, _res, next) => next(),
-      rateLimiter: (_req, _res, next) => next(),
-      concurrencyLimiter: buildConcurrencyLimiter(1)
-    });
+    // First request enters — slot occupied
+    limiter(ctx1.req, ctx1.res, ctx1.next);
+    expect(ctx1.next.calls).toHaveLength(1);
+    expect(ctx1.next.calls[0]).toBeUndefined();
 
-    const payload = { language: 'javascript', code: 'const a = 1;' };
+    // Second request arrives while first is in flight — must be rejected
+    limiter(ctx2.req, ctx2.res, ctx2.next);
+    expect(ctx2.next.calls).toHaveLength(1);
+    expect(ctx2.next.calls[0]).toBeInstanceOf(Error);
+  });
 
-    const inFlight = request(app).post('/api/analyze').send(payload);
-    // Give the first request a tick to enter the handler and increment the counter.
-    await new Promise((r) => setImmediate(r));
+  it('frees the slot on res "finish" and allows the next request', () => {
+    const limiter = buildConcurrencyLimiter(1);
+    const ctx1 = mockContext();
+    const ctx2 = mockContext();
 
-    const rejected = await request(app).post('/api/analyze').send(payload);
-    expect(rejected.status).toBe(503);
-    expect(rejected.body.success).toBe(false);
+    limiter(ctx1.req, ctx1.res, ctx1.next);
 
-    first.resolve({
-      id: 'a1',
-      language: 'javascript',
-      summary: { totalIssues: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 },
-      vulnerabilities: []
-    });
-    const completed = await inFlight;
-    expect(completed.status).toBe(200);
-    expect(completed.body.analysis.id).toBe('a1');
+    // Simulate finishing the first response
+    ctx1.res.emit('finish');
 
-    // Now that the first request has finished, the slot is free again.
-    const after = await request(app).post('/api/analyze').send(payload);
-    expect(after.status).toBe(200);
+    // Now the slot is free; the next request should pass
+    limiter(ctx2.req, ctx2.res, ctx2.next);
+    expect(ctx2.next.calls[0]).toBeUndefined();
+  });
+
+  it('frees the slot on res "close" (client disconnect)', () => {
+    const limiter = buildConcurrencyLimiter(1);
+    const ctx1 = mockContext();
+    const ctx2 = mockContext();
+
+    limiter(ctx1.req, ctx1.res, ctx1.next);
+    ctx1.res.emit('close');
+
+    limiter(ctx2.req, ctx2.res, ctx2.next);
+    expect(ctx2.next.calls[0]).toBeUndefined();
+  });
+
+  it('does not double-release if both finish and close fire', () => {
+    const limiter = buildConcurrencyLimiter(2);
+    const ctx1 = mockContext();
+    const ctx2 = mockContext();
+    const ctx3 = mockContext();
+
+    limiter(ctx1.req, ctx1.res, ctx1.next);
+    limiter(ctx2.req, ctx2.res, ctx2.next);
+
+    // Both slots occupied; third must be rejected
+    limiter(ctx3.req, ctx3.res, ctx3.next);
+    expect(ctx3.next.calls[0]).toBeInstanceOf(Error);
+
+    // Double-release ctx1 (finish then close)
+    ctx1.res.emit('finish');
+    ctx1.res.emit('close');
+
+    // Only one slot freed — third re-attempt should now pass (1 of 2 slots free)
+    const ctx4 = mockContext();
+    limiter(ctx4.req, ctx4.res, ctx4.next);
+    expect(ctx4.next.calls[0]).toBeUndefined();
+
+    // But a fifth should still be rejected (second slot still taken by ctx2)
+    const ctx5 = mockContext();
+    limiter(ctx5.req, ctx5.res, ctx5.next);
+    expect(ctx5.next.calls[0]).toBeInstanceOf(Error);
   });
 });

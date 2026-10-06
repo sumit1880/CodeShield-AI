@@ -12,13 +12,14 @@ import { buildManagerUserPrompt, MANAGER_SYSTEM_PROMPT } from './prompts/manager
 export class ManagerAgent {
   constructor(private llm: LlmService) {}
 
-  async decide(state: AnalysisState): Promise<ManagerDecision> {
+  async decide(state: AnalysisState, signal?: AbortSignal): Promise<ManagerDecision> {
     const userPrompt = buildManagerUserPrompt(state);
 
     const result = await generateStructured(this.llm, {
       systemPrompt: MANAGER_SYSTEM_PROMPT,
       userPrompt,
-      schema: managerDecisionSchema
+      schema: managerDecisionSchema,
+      signal
     });
 
     return {

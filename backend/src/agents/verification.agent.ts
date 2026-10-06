@@ -10,6 +10,7 @@ export interface VerificationInput {
   sourceCode: string;
   findings: AnalyzedFinding[];
   semgrepFindings?: SemgrepFinding[];
+  signal?: AbortSignal;
 }
 
 export interface VerificationOutput {
@@ -36,7 +37,8 @@ export class VerificationAgent {
     const result = await generateStructured(this.llm, {
       systemPrompt: VERIFICATION_SYSTEM_PROMPT,
       userPrompt,
-      schema: verificationOutputSchema
+      schema: verificationOutputSchema,
+      signal: input.signal
     });
 
     // Semgrep findings with severity ERROR are a floor:

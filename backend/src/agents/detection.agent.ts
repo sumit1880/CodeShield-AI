@@ -8,6 +8,7 @@ export interface DetectionInput {
   language: string;
   sourceCode: string;
   semgrepFindings: SemgrepFinding[];
+  signal?: AbortSignal;
 }
 
 export interface DetectionOutput {
@@ -30,7 +31,8 @@ export class DetectionAgent {
     const result = await generateStructured(this.llm, {
       systemPrompt: DETECTION_SYSTEM_PROMPT,
       userPrompt,
-      schema: detectionOutputSchema
+      schema: detectionOutputSchema,
+      signal: input.signal
     });
 
     return result;

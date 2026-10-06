@@ -69,10 +69,12 @@ describe('POST /api/analyze', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.analysis.id).toBe('analysis-1');
-    expect(container.orchestrator.analyzePastedCode).toHaveBeenCalledWith({
-      language: 'javascript',
-      code: 'const a = 1;'
-    });
+    expect(container.orchestrator.analyzePastedCode).toHaveBeenCalledWith(
+      expect.objectContaining({
+        language: 'javascript',
+        code: 'const a = 1;'
+      })
+    );
   });
 });
 

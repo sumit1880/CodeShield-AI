@@ -19,6 +19,7 @@ export interface ToolRegistryDeps {
 export interface ToolContext {
   projectRoot: string;
   language: string;
+  signal?: AbortSignal;
   /** Returns the base source view plus any evidence gathered so far. */
   getSourceView(): string;
 }
@@ -64,7 +65,8 @@ export function createToolRegistry(deps: ToolRegistryDeps, ctx: ToolContext): Re
       const detection = await deps.detectionAgent.run({
         language: ctx.language,
         sourceCode: ctx.getSourceView(),
-        semgrepFindings: state.semgrepFindings
+        semgrepFindings: state.semgrepFindings,
+        signal: ctx.signal
       });
       state.candidateFindings = dedupeMerge<CandidateFinding>(state.candidateFindings, detection.findings);
       return { resultSummary: `Detection produced ${detection.findings.length} candidate finding(s).` };
@@ -111,7 +113,8 @@ export function createToolRegistry(deps: ToolRegistryDeps, ctx: ToolContext): Re
         language: ctx.language,
         sourceCode: ctx.getSourceView(),
         findings: pending,
-        securityKnowledge: state.knowledge
+        securityKnowledge: state.knowledge,
+        signal: ctx.signal
       });
       state.classifiedFindings = dedupeMerge<AnalyzedFinding>(state.classifiedFindings, classification.findings);
       return { resultSummary: `Classified ${classification.findings.length} finding(s).` };
@@ -125,7 +128,8 @@ export function createToolRegistry(deps: ToolRegistryDeps, ctx: ToolContext): Re
         language: ctx.language,
         sourceCode: ctx.getSourceView(),
         findings: pending,
-        semgrepFindings: state.semgrepFindings
+        semgrepFindings: state.semgrepFindings,
+        signal: ctx.signal
       });
       for (const v of verification.findings) state.verifiedById.set(v.id, v);
       return { resultSummary: `Verified ${verification.findings.length} finding(s).` };
@@ -144,7 +148,8 @@ export function createToolRegistry(deps: ToolRegistryDeps, ctx: ToolContext): Re
         language: ctx.language,
         sourceCode: ctx.getSourceView(),
         findings: targets,
-        semgrepFindings: state.semgrepFindings
+        semgrepFindings: state.semgrepFindings,
+        signal: ctx.signal
       });
       for (const v of verification.findings) state.verifiedById.set(v.id, v);
       return { resultSummary: `Reanalyzed ${verification.findings.length} previously uncertain finding(s).` };

@@ -28,11 +28,15 @@ function tryParseJson(text: string): unknown {
  */
 export async function generateStructured<T>(
   llm: LlmService,
-  params: { systemPrompt: string; userPrompt: string; schema: z.ZodSchema<T> }
+  params: { systemPrompt: string; userPrompt: string; schema: z.ZodSchema<T>; signal?: AbortSignal }
 ): Promise<T> {
-  const { systemPrompt, userPrompt, schema } = params;
+  const { systemPrompt, userPrompt, schema, signal } = params;
 
-  const first = await llm.generate({ systemPrompt, userPrompt, jsonMode: true });
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error('Aborted');
+  }
+
+  const first = await llm.generate({ systemPrompt, userPrompt, jsonMode: true, signal });
 
   const attempt = (raw: string) => {
     let parsed: unknown;
@@ -53,6 +57,10 @@ export async function generateStructured<T>(
 
   logger.warn({ error: firstResult.error }, 'AI response failed validation, attempting repair');
 
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error('Aborted');
+  }
+
   const repairPrompt = [
     'Your previous response was invalid. Fix it and return ONLY valid JSON matching the required schema.',
     `Validation error: ${firstResult.error}`,
@@ -60,7 +68,7 @@ export async function generateStructured<T>(
     first.text
   ].join('\n\n');
 
-  const repaired = await llm.generate({ systemPrompt, userPrompt: repairPrompt, jsonMode: true });
+  const repaired = await llm.generate({ systemPrompt, userPrompt: repairPrompt, jsonMode: true, signal });
   const repairedResult = attempt(repaired.text);
 
   if (repairedResult.ok) return repairedResult.data;
