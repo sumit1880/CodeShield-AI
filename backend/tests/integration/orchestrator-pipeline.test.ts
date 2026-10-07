@@ -113,7 +113,7 @@ describe('AnalysisOrchestrator bounded autonomous pipeline (mocked LLM)', () => 
     expect(llm.calls.length).toBe(5);
 
     expect(result.vulnerabilities).toHaveLength(1);
-    expect(result.vulnerabilities[0].id).toBe('F1');
+    expect(result.vulnerabilities[0].id).toBe('finding-1');
     expect(result.vulnerabilities[0].verification.status).toBe('CONFIRMED');
     expect(result.summary.totalIssues).toBe(1);
     expect(result.summary.high).toBe(1);
@@ -309,7 +309,7 @@ describe('AnalysisOrchestrator bounded autonomous pipeline (mocked LLM)', () => 
       // and must NEVER upgrade it to CONFIRMED just because time ran out.
       expect(result.vulnerabilities).toHaveLength(0);
       expect(result.uncertainFindings).toHaveLength(1);
-      expect(result.uncertainFindings[0].id).toBe('F1');
+      expect(result.uncertainFindings[0].id).toBe('finding-1');
       expect(result.uncertainFindings[0].verification.status).toBe('UNVERIFIED');
       expect(result.partial).toBe(true);
       expect(result.analysisStatus).toBe('PARTIAL');

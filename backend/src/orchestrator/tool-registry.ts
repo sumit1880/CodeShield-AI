@@ -39,10 +39,30 @@ function asInt(v: unknown, fallback: number): number {
   return Number.isFinite(n) ? Math.trunc(n) : fallback;
 }
 
-function dedupeMerge<T extends { id: string }>(existing: T[], incoming: T[]): T[] {
-  const byId = new Map(existing.map((f) => [f.id, f]));
-  for (const item of incoming) byId.set(item.id, item);
-  return Array.from(byId.values());
+function dedupeMerge<T extends { id: string; title?: string; file?: string; lineStart?: number }>(
+  existing: T[],
+  incoming: T[]
+): T[] {
+  let nextIdNum = existing.length + 1;
+  const result = [...existing];
+
+  for (const item of incoming) {
+    const isDuplicate = existing.some(
+      (e) =>
+        e.title === item.title &&
+        e.file === item.file &&
+        e.lineStart === item.lineStart
+    );
+
+    if (!isDuplicate) {
+      result.push({
+        ...item,
+        id: `finding-${nextIdNum++}`
+      });
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -116,7 +136,15 @@ export function createToolRegistry(deps: ToolRegistryDeps, ctx: ToolContext): Re
         securityKnowledge: state.knowledge,
         signal: ctx.signal
       });
-      state.classifiedFindings = dedupeMerge<AnalyzedFinding>(state.classifiedFindings, classification.findings);
+
+      const byId = new Map(state.classifiedFindings.map((f) => [f.id, f]));
+      for (let i = 0; i < classification.findings.length; i++) {
+        const item = classification.findings[i];
+        // If the LLM returned its own ID (e.g. F1), map it to the corresponding pending candidate ID
+        const targetId = pending.find((p) => p.id === item.id)?.id ?? pending[i]?.id ?? item.id;
+        byId.set(targetId, { ...item, id: targetId });
+      }
+      state.classifiedFindings = Array.from(byId.values());
       return { resultSummary: `Classified ${classification.findings.length} finding(s).` };
     },
 
@@ -131,7 +159,11 @@ export function createToolRegistry(deps: ToolRegistryDeps, ctx: ToolContext): Re
         semgrepFindings: state.semgrepFindings,
         signal: ctx.signal
       });
-      for (const v of verification.findings) state.verifiedById.set(v.id, v);
+      for (let i = 0; i < verification.findings.length; i++) {
+        const v = verification.findings[i];
+        const targetId = pending.find((p) => p.id === v.id)?.id ?? pending[i]?.id ?? v.id;
+        state.verifiedById.set(targetId, { ...v, id: targetId });
+      }
       return { resultSummary: `Verified ${verification.findings.length} finding(s).` };
     },
 
@@ -151,7 +183,11 @@ export function createToolRegistry(deps: ToolRegistryDeps, ctx: ToolContext): Re
         semgrepFindings: state.semgrepFindings,
         signal: ctx.signal
       });
-      for (const v of verification.findings) state.verifiedById.set(v.id, v);
+      for (let i = 0; i < verification.findings.length; i++) {
+        const v = verification.findings[i];
+        const targetId = targets.find((t) => t.id === v.id)?.id ?? targets[i]?.id ?? v.id;
+        state.verifiedById.set(targetId, { ...v, id: targetId });
+      }
       return { resultSummary: `Reanalyzed ${verification.findings.length} previously uncertain finding(s).` };
     },
 
