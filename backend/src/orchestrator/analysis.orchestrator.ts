@@ -34,6 +34,7 @@ export interface OrchestratorDeps {
 export interface AnalyzePastedCodeInput {
   language: string;
   code: string;
+  userId?: string;
   signal?: AbortSignal;
 }
 
@@ -41,6 +42,7 @@ export interface AnalyzeProjectInput {
   language: string; // may be 'auto'
   files: Array<{ relativePath: string; absolutePath: string }>;
   projectRoot: string;
+  userId?: string;
   signal?: AbortSignal;
 }
 
@@ -54,7 +56,8 @@ export interface AnalysisSummary {
 }
 
 export interface AnalysisResult {
-  id: string;
+  id?: string;
+  persisted: boolean;
   language: string;
   summary: AnalysisSummary;
   vulnerabilities: VulnerabilityResponse[];
@@ -109,7 +112,7 @@ export class AnalysisOrchestrator {
   constructor(private deps: OrchestratorDeps) {}
 
   async analyzePastedCode(input: AnalyzePastedCodeInput): Promise<AnalysisResult> {
-    const { language, code, signal } = input;
+    const { language, code, userId, signal } = input;
     if (signal?.aborted) {
       throw signal.reason ?? new Error('Aborted');
     }
@@ -139,15 +142,19 @@ export class AnalysisOrchestrator {
       });
 
       const analysisId = await this.persist({
+        userId,
         language,
         codeHash: hashCode(code),
         sourceType: 'PASTE',
         durationMs: Date.now() - startedAt,
-        vulnerabilities: result.vulnerabilities
+        vulnerabilities: result.vulnerabilities,
+        uncertainFindings: result.uncertainFindings,
+        partial: result.partial
       });
 
       return {
-        id: analysisId,
+        id: analysisId ?? undefined,
+        persisted: analysisId !== null,
         language,
         summary: summarize(result.vulnerabilities),
         vulnerabilities: result.vulnerabilities,
@@ -158,9 +165,10 @@ export class AnalysisOrchestrator {
     });
   }
 
+
   async analyzeProject(input: AnalyzeProjectInput): Promise<AnalysisResult> {
     const startedAt = Date.now();
-    const { language, files, projectRoot, signal } = input;
+    const { language, files, projectRoot, userId, signal } = input;
     if (signal?.aborted) {
       throw signal.reason ?? new Error('Aborted');
     }
@@ -210,15 +218,19 @@ export class AnalysisOrchestrator {
     });
 
     const analysisId = await this.persist({
+      userId,
       language: effectiveLanguage,
       codeHash: await this.hashProject(relevantFiles),
       sourceType: 'ZIP',
       durationMs: Date.now() - startedAt,
-      vulnerabilities: result.vulnerabilities
+      vulnerabilities: result.vulnerabilities,
+      uncertainFindings: result.uncertainFindings,
+      partial: result.partial
     });
 
     return {
-      id: analysisId,
+      id: analysisId ?? undefined,
+      persisted: analysisId !== null,
       language: effectiveLanguage,
       summary: summarize(result.vulnerabilities),
       vulnerabilities: result.vulnerabilities,
@@ -227,6 +239,7 @@ export class AnalysisOrchestrator {
       analysisStatus: result.partial ? 'PARTIAL' : 'COMPLETE'
     };
   }
+
 
   // -------------------------------------------------------------------
   // Bounded autonomous multi-agent pipeline.
@@ -397,7 +410,7 @@ export class AnalysisOrchestrator {
       };
 
       if (verdict?.status === 'CONFIRMED') {
-        vulnerabilities.push({ ...base, verification: { status: 'CONFIRMED', confidence: verdict.confidence } });
+        vulnerabilities.push({ ...base, verification: { status: 'CONFIRMED', confidence: verdict.confidence, reason: verdict.reason } });
       } else if (verdict?.status === 'REJECTED') {
         // Semgrep findings with severity ERROR are a floor:
         // the verifier may mark them UNCERTAIN but not silently REJECTED without a stored reason.
@@ -463,46 +476,70 @@ export class AnalysisOrchestrator {
   }
 
   private async persist(params: {
+    userId?: string;
     language: string;
     codeHash: string;
     sourceType: 'PASTE' | 'ZIP';
     durationMs: number;
     vulnerabilities: VulnerabilityResponse[];
-  }): Promise<string> {
+    uncertainFindings: UncertainFindingResponse[];
+    partial: boolean;
+  }): Promise<string | null> {
     try {
+      // Confirmed findings are persisted with the verifier's real reason.
+      // UNCERTAIN findings are also persisted so a partial run never silently loses classified work.
+      const confirmedRows = params.vulnerabilities.map((v) => ({
+        title: v.title,
+        cweId: v.cwe.id,
+        cweName: v.cwe.name,
+        severity: v.severity,
+        confidence: v.confidence,
+        file: v.location.file,
+        function: v.location.function ?? undefined,
+        lineStart: v.location.lineStart,
+        lineEnd: v.location.lineEnd,
+        explanation: v.explanation,
+        recommendation: v.recommendation,
+        verificationStatus: 'CONFIRMED' as const,
+        verificationReason: v.verification.reason ?? v.explanation
+      }));
+
+      const uncertainRows = params.uncertainFindings.map((u) => ({
+        title: u.title,
+        cweId: u.cwe.id,
+        cweName: u.cwe.name,
+        severity: u.severity,
+        confidence: u.confidence,
+        file: u.location.file,
+        function: u.location.function ?? undefined,
+        lineStart: u.location.lineStart,
+        lineEnd: u.location.lineEnd,
+        explanation: u.explanation,
+        recommendation: u.recommendation,
+        // UNVERIFIED is not in the DB enum; store as UNCERTAIN so a partial
+        // run's findings survive without schema changes.
+        verificationStatus: 'UNCERTAIN' as const,
+        verificationReason: u.verification.reason ?? 'Analysis did not reach a final verdict'
+      }));
+
       const analysis = await this.deps.prisma.analysis.create({
         data: {
+          userId: params.userId,
           language: params.language,
           codeHash: params.codeHash,
           sourceType: params.sourceType,
-          status: 'COMPLETED',
+          status: params.partial ? 'PARTIAL' : 'COMPLETED',
           completedAt: new Date(),
           durationMs: params.durationMs,
           findings: {
-            create: params.vulnerabilities.map((v) => ({
-              title: v.title,
-              cweId: v.cwe.id,
-              cweName: v.cwe.name,
-              severity: v.severity,
-              confidence: v.confidence,
-              file: v.location.file,
-              function: v.location.function ?? undefined,
-              lineStart: v.location.lineStart,
-              lineEnd: v.location.lineEnd,
-              explanation: v.explanation,
-              recommendation: v.recommendation,
-              verificationStatus: v.verification.status,
-              verificationReason: 'See explanation'
-            }))
+            create: [...confirmedRows, ...uncertainRows]
           }
         }
       });
       return analysis.id;
     } catch (err) {
       logger.error({ err }, 'Failed to persist analysis; returning results without storage');
-      // Persistence is important but should not block returning results to
-      // the caller if the DB is temporarily unavailable in this prototype.
-      return crypto.randomUUID();
+      return null;
     }
   }
 

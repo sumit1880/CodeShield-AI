@@ -5,6 +5,7 @@ import { ApiError, ErrorCode } from '../utils/errors';
 import { withTempDir } from '../utils/temp-workspace';
 import { zipUpload } from '../middleware/upload';
 import { googleAuth } from '../middleware/google-auth.middleware';
+import { AuthenticatedRequest } from '../middleware/google-auth.middleware';
 import { buildConcurrencyLimiter } from '../middleware/concurrency';
 import { buildUserRateLimiter } from '../middleware/user-rate-limit';
 import { env } from '../config/env';
@@ -56,6 +57,7 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
       const result = await container.orchestrator.analyzePastedCode({
         language: parsed.data.language,
         code: parsed.data.code,
+        userId: (req as AuthenticatedRequest).user?.id,
         signal: abortController.signal
       });
 
@@ -112,6 +114,7 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
           language,
           files: extracted.map((f) => ({ relativePath: f.relativePath, absolutePath: f.absolutePath })),
           projectRoot: tempDir,
+          userId: (req as AuthenticatedRequest).user?.id,
           signal: abortController.signal
         });
       });
@@ -136,6 +139,7 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
 function toApiShape(result: Awaited<ReturnType<Container['orchestrator']['analyzePastedCode']>>) {
   return {
     id: result.id,
+    persisted: result.persisted,
     language: result.language,
     summary: result.summary,
     vulnerabilities: result.vulnerabilities,
@@ -147,3 +151,4 @@ function toApiShape(result: Awaited<ReturnType<Container['orchestrator']['analyz
     analysisStatus: result.analysisStatus ?? 'COMPLETE'
   };
 }
+
