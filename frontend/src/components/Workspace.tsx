@@ -47,7 +47,7 @@ export function Workspace() {
             setViewedHistoryResult(null);
           }}
         />
-        <HistoryPanel entries={history} onSelect={setViewedHistoryResult} />
+        <HistoryPanel entries={history} idToken={idToken} onSelect={setViewedHistoryResult} />
       </div>
     );
   }
@@ -108,7 +108,7 @@ export function Workspace() {
         {state.phase === 'error' && <ErrorBanner error={state.error} onRetry={handleSubmit} />}
       </div>
 
-      <HistoryPanel entries={history} onSelect={setViewedHistoryResult} />
+      <HistoryPanel entries={history} idToken={idToken} onSelect={setViewedHistoryResult} />
     </div>
   );
 }
