@@ -51,7 +51,11 @@ export function createApp(container: Container = buildContainer(), options: Crea
   app.use(
     '/api',
     rateLimiter,
-    buildAnalyzeRouter(container, { authMiddleware: options.authMiddleware, concurrencyLimiter: options.concurrencyLimiter })
+    buildAnalyzeRouter(container, {
+      authMiddleware: options.authMiddleware,
+      userRateLimiter: options.userRateLimiter,
+      concurrencyLimiter: options.concurrencyLimiter
+    })
   );
 
   app.use(notFoundHandler);

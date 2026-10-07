@@ -106,6 +106,8 @@ export const env = {
     maxRequests: intEnv('RATE_LIMIT_MAX_REQUESTS', 30)
   },
 
+  dailyAnalysisLimit: intEnv('DAILY_ANALYSIS_LIMIT', 30),
+
   concurrency: {
     maxConcurrentAnalyses: intEnv('MAX_CONCURRENT_ANALYSES', 3)
   }

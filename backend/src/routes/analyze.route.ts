@@ -6,6 +6,7 @@ import { withTempDir } from '../utils/temp-workspace';
 import { zipUpload } from '../middleware/upload';
 import { googleAuth } from '../middleware/google-auth.middleware';
 import { buildConcurrencyLimiter } from '../middleware/concurrency';
+import { buildUserRateLimiter } from '../middleware/user-rate-limit';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import { RequestWithId } from '../middleware/request-id';
@@ -13,6 +14,8 @@ import { RequestWithId } from '../middleware/request-id';
 export interface AnalyzeRouterOptions {
   /** Verifies the caller's Google ID token. Defaults to real Google verification. */
   authMiddleware?: RequestHandler;
+  /** Enforces daily per-user analysis quota. Defaults to real in-memory limiter keyed by user id. */
+  userRateLimiter?: RequestHandler;
   /** Caps simultaneous in-flight analyses. Defaults to a real in-memory limiter. */
   concurrencyLimiter?: RequestHandler;
 }
@@ -21,12 +24,12 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
   const router = Router();
 
   const authMiddleware = options.authMiddleware ?? googleAuth;
+  const userRateLimiter = options.userRateLimiter ?? buildUserRateLimiter();
   const concurrencyLimiter = options.concurrencyLimiter ?? buildConcurrencyLimiter(env.concurrency.maxConcurrentAnalyses);
 
-  // Every route below requires a verified Google identity and counts toward
-  // the shared concurrency budget — these are the expensive, LLM-backed
-  // endpoints this app exists to protect.
-  router.use(authMiddleware, concurrencyLimiter);
+  // Every route below requires a verified Google identity, enforces per-user rate limits,
+  // and counts toward the shared concurrency budget.
+  router.use(authMiddleware, userRateLimiter, concurrencyLimiter);
 
   router.post('/analyze', async (req, res, next) => {
     const requestId = (req as RequestWithId).requestId;
