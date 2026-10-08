@@ -35,6 +35,7 @@ export interface AnalyzePastedCodeInput {
   language: string;
   code: string;
   userId?: string;
+  analysisId?: string;
   signal?: AbortSignal;
 }
 
@@ -43,8 +44,10 @@ export interface AnalyzeProjectInput {
   files: Array<{ relativePath: string; absolutePath: string }>;
   projectRoot: string;
   userId?: string;
+  analysisId?: string;
   signal?: AbortSignal;
 }
+
 
 export interface AnalysisSummary {
   totalIssues: number;
@@ -112,7 +115,7 @@ export class AnalysisOrchestrator {
   constructor(private deps: OrchestratorDeps) {}
 
   async analyzePastedCode(input: AnalyzePastedCodeInput): Promise<AnalysisResult> {
-    const { language, code, userId, signal } = input;
+    const { language, code, userId, analysisId: preCreatedId, signal } = input;
     if (signal?.aborted) {
       throw signal.reason ?? new Error('Aborted');
     }
@@ -142,6 +145,7 @@ export class AnalysisOrchestrator {
       });
 
       const analysisId = await this.persist({
+        existingId: preCreatedId,
         userId,
         language,
         codeHash: hashCode(code),
@@ -151,6 +155,7 @@ export class AnalysisOrchestrator {
         uncertainFindings: result.uncertainFindings,
         partial: result.partial
       });
+
 
       return {
         id: analysisId ?? undefined,
@@ -168,7 +173,7 @@ export class AnalysisOrchestrator {
 
   async analyzeProject(input: AnalyzeProjectInput): Promise<AnalysisResult> {
     const startedAt = Date.now();
-    const { language, files, projectRoot, userId, signal } = input;
+    const { language, files, projectRoot, userId, analysisId: preCreatedId, signal } = input;
     if (signal?.aborted) {
       throw signal.reason ?? new Error('Aborted');
     }
@@ -218,6 +223,7 @@ export class AnalysisOrchestrator {
     });
 
     const analysisId = await this.persist({
+      existingId: preCreatedId,
       userId,
       language: effectiveLanguage,
       codeHash: await this.hashProject(relevantFiles),
@@ -227,6 +233,7 @@ export class AnalysisOrchestrator {
       uncertainFindings: result.uncertainFindings,
       partial: result.partial
     });
+
 
     return {
       id: analysisId ?? undefined,
@@ -476,6 +483,7 @@ export class AnalysisOrchestrator {
   }
 
   private async persist(params: {
+    existingId?: string;
     userId?: string;
     language: string;
     codeHash: string;
@@ -522,6 +530,21 @@ export class AnalysisOrchestrator {
         verificationReason: u.verification.reason ?? 'Analysis did not reach a final verdict'
       }));
 
+      if (params.existingId) {
+        await this.deps.prisma.analysis.update({
+          where: { id: params.existingId },
+          data: {
+            status: params.partial ? 'PARTIAL' : 'COMPLETED',
+            completedAt: new Date(),
+            durationMs: params.durationMs,
+            findings: {
+              create: [...confirmedRows, ...uncertainRows]
+            }
+          }
+        });
+        return params.existingId;
+      }
+
       const analysis = await this.deps.prisma.analysis.create({
         data: {
           userId: params.userId,
@@ -542,6 +565,7 @@ export class AnalysisOrchestrator {
       return null;
     }
   }
+
 
   /** Hash of paths + contents, so two different projects with the same file names don't collide. */
   private async hashProject(files: Array<{ relativePath: string; absolutePath: string }>): Promise<string> {
