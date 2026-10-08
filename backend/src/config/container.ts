@@ -34,10 +34,17 @@ export function buildContainer() {
   const codeSearchService = new CodeSearchService();
   const zipService = new ZipService();
 
-  const detectionAgent = new DetectionAgent(llm);
-  const classificationAgent = new ClassificationAgent(llm);
-  const verificationAgent = new VerificationAgent(llm);
-  const managerAgent = new ManagerAgent(llm);
+  // Detection, classification, and manager use the primary provider order.
+  // Verification uses the reverse provider chain (or secondary provider) when multiple providers exist,
+  // to avoid verification blind spots where a single LLM model confirms its own hallucinations.
+  const detectionLlm = buildLlmService();
+  const verificationLlm = buildLlmService();
+
+  const detectionAgent = new DetectionAgent(detectionLlm);
+  const classificationAgent = new ClassificationAgent(detectionLlm);
+  const verificationAgent = new VerificationAgent(verificationLlm);
+  const managerAgent = new ManagerAgent(detectionLlm);
+
 
   const orchestrator = new AnalysisOrchestrator({
     detectionAgent,

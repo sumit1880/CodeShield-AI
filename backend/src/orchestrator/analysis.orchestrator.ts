@@ -135,14 +135,30 @@ export class AnalysisOrchestrator {
       const semgrepFindings = await this.runSemgrepSafely(tempDir, language);
       const submissionFile = 'submission' + ext;
 
+      // If code is unusually large (>3000 lines), present a bounded view containing
+      // context around Semgrep findings plus the first 1000 lines, so the LLM
+      // does not exceed provider context windows or dilute its attention.
+      const lines = code.split('\n');
+      let effectiveSource = code;
+      if (lines.length > 3000) {
+        const head = lines.slice(0, 1000).join('\n');
+        const findingWindows = semgrepFindings.map((f) => {
+          const start = Math.max(0, f.lineStart - 20);
+          const end = Math.min(lines.length, f.lineEnd + 20);
+          return `// Lines ${start}-${end} (near ${f.ruleId})\n` + lines.slice(start, end).join('\n');
+        });
+        effectiveSource = [head, '// ... (middle omitted for length) ...', ...findingWindows].join('\n\n---\n\n');
+      }
+
       const result = await this.runAgenticPipeline({
         language,
-        sourceCode: code,
+        sourceCode: effectiveSource,
         semgrepFindings: semgrepFindings.map((f) => ({ ...f, file: submissionFile })),
         projectRoot: tempDir,
         files: [submissionFile],
         signal
       });
+
 
       const analysisId = await this.persist({
         existingId: preCreatedId,

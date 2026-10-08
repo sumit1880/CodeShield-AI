@@ -24,6 +24,8 @@ rules:
       - pattern-either:
           - pattern: child_process.exec($CMD, ...)
           - pattern: exec($CMD, ...)
+      - pattern-not: exec("...", ...)
+      - pattern-not: child_process.exec("...", ...)
     metadata:
       cwe: "CWE-78"
       category: security
@@ -39,9 +41,13 @@ rules:
       - metavariable-regex:
           metavariable: $VAR
           regex: (?i)(api_?key|secret|password|token)
+      - metavariable-analysis:
+          analyzer: entropy
+          metavariable: $VAR
     metadata:
       cwe: "CWE-798"
       category: security
+
 
   - id: js-eval-usage
     languages: [javascript, typescript]
