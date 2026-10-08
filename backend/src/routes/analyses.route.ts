@@ -117,5 +117,39 @@ export function buildAnalysesRouter(container: Container, options: AnalysesRoute
     }
   });
 
+  // ------------------------------------------------------------------
+  // GET /api/analyses/:id/sarif
+  // ------------------------------------------------------------------
+  router.get('/:id/sarif', async (req, res, next) => {
+    try {
+      const userId = (req as AuthenticatedRequest).user?.id;
+      if (!userId) throw new ApiError(ErrorCode.UNAUTHORIZED, 'Authentication required');
+
+      const { id } = req.params;
+
+      const analysis = await container.prisma.analysis.findFirst({
+        where: { id, userId },
+        include: { findings: true }
+      });
+
+      if (!analysis) {
+        throw new ApiError(ErrorCode.NOT_FOUND, 'Analysis not found');
+      }
+
+      const { generateSarifLog } = await import('../utils/sarif');
+      const sarifLog = generateSarifLog({
+        analysisId: analysis.id,
+        findings: analysis.findings
+      });
+
+      res.setHeader('Content-Type', 'application/sarif+json');
+      res.setHeader('Content-Disposition', `attachment; filename="codeshield-${analysis.id}.sarif"`);
+      res.json(sarifLog);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
+
