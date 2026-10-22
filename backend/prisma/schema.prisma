@@ -20,12 +20,14 @@ enum Severity {
 enum VerificationStatus {
   CONFIRMED
   REJECTED
+  UNCERTAIN
 }
 
 enum AnalysisStatus {
   PENDING
   RUNNING
   COMPLETED
+  PARTIAL
   FAILED
 }
 
@@ -36,6 +38,7 @@ enum SourceType {
 
 model Analysis {
   id          String         @id @default(cuid())
+  userId      String?
   language    String
   codeHash    String
   sourceType  SourceType
@@ -46,6 +49,7 @@ model Analysis {
 
   findings Finding[]
 
+  @@index([userId])
   @@index([codeHash])
   @@index([createdAt])
 }

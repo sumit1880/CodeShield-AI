@@ -9,6 +9,7 @@ export interface LlmRequest {
   userPrompt: string;
   /** When true, the provider is asked to return a JSON-only response. */
   jsonMode?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface LlmResponse {

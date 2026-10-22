@@ -93,4 +93,48 @@ export async function analyzeUpload(
   return handleResponse<AnalyzeSuccessResponse>(res);
 }
 
+export async function getAnalyses(
+  idToken: string,
+  page: number = 1,
+  limit: number = 20,
+  signal?: AbortSignal
+): Promise<{
+  success: true;
+  data: Array<{
+    id: string;
+    language: string;
+    sourceType: string;
+    status: string;
+    createdAt: string;
+    completedAt: string | null;
+    durationMs: number | null;
+    findingCount: number;
+  }>;
+  pagination: { page: number; limit: number; total: number; totalPages: number };
+}> {
+  const res = await fetch(`${BASE_URL}/api/analyses?page=${page}&limit=${limit}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${idToken}`
+    },
+    signal
+  });
+  return handleResponse(res);
+}
+
+export async function getAnalysisById(
+  idToken: string,
+  id: string,
+  signal?: AbortSignal
+): Promise<{ success: true; data: any }> {
+  const res = await fetch(`${BASE_URL}/api/analyses/${encodeURIComponent(id)}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${idToken}`
+    },
+    signal
+  });
+  return handleResponse(res);
+}
+
 export const API_BASE_URL = BASE_URL;

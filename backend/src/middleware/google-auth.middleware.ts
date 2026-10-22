@@ -50,6 +50,10 @@ export function buildGoogleAuthMiddleware(verify?: VerifyIdToken): RequestHandle
       if (!payload || !payload.sub) {
         return next(new ApiError(ErrorCode.UNAUTHORIZED, 'Invalid Google ID token'));
       }
+      // An address Google hasn't verified shouldn't count as an identity
+      if (payload.email && payload.email_verified === false) {
+        return next(new ApiError(ErrorCode.UNAUTHORIZED, 'Google account email is not verified'));
+      }
       req.user = { id: payload.sub, email: payload.email };
       next();
     } catch {

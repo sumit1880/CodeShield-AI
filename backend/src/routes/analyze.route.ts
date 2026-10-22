@@ -5,7 +5,9 @@ import { ApiError, ErrorCode } from '../utils/errors';
 import { withTempDir } from '../utils/temp-workspace';
 import { zipUpload } from '../middleware/upload';
 import { googleAuth } from '../middleware/google-auth.middleware';
+import { AuthenticatedRequest } from '../middleware/google-auth.middleware';
 import { buildConcurrencyLimiter } from '../middleware/concurrency';
+import { buildUserRateLimiter } from '../middleware/user-rate-limit';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import { RequestWithId } from '../middleware/request-id';
@@ -13,6 +15,8 @@ import { RequestWithId } from '../middleware/request-id';
 export interface AnalyzeRouterOptions {
   /** Verifies the caller's Google ID token. Defaults to real Google verification. */
   authMiddleware?: RequestHandler;
+  /** Enforces daily per-user analysis quota. Defaults to real in-memory limiter keyed by user id. */
+  userRateLimiter?: RequestHandler;
   /** Caps simultaneous in-flight analyses. Defaults to a real in-memory limiter. */
   concurrencyLimiter?: RequestHandler;
 }
@@ -21,32 +25,97 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
   const router = Router();
 
   const authMiddleware = options.authMiddleware ?? googleAuth;
+  const userRateLimiter = options.userRateLimiter ?? buildUserRateLimiter();
   const concurrencyLimiter = options.concurrencyLimiter ?? buildConcurrencyLimiter(env.concurrency.maxConcurrentAnalyses);
 
-  // Every route below requires a verified Google identity and counts toward
-  // the shared concurrency budget — these are the expensive, LLM-backed
-  // endpoints this app exists to protect.
-  router.use(authMiddleware, concurrencyLimiter);
+  // Every route below requires a verified Google identity, enforces per-user rate limits,
+  // and counts toward the shared concurrency budget.
+  router.use(authMiddleware, userRateLimiter, concurrencyLimiter);
 
   router.post('/analyze', async (req, res, next) => {
     const requestId = (req as RequestWithId).requestId;
+    const abortController = new AbortController();
+    let finished = false;
+
+    res.on('finish', () => {
+      finished = true;
+    });
+    res.on('close', () => {
+      if (!finished && !res.writableEnded) {
+        abortController.abort();
+      }
+    });
+
     try {
       const parsed = analyzeRequestSchema.safeParse(req.body);
       if (!parsed.success) {
         throw new ApiError(ErrorCode.INVALID_REQUEST, 'Invalid request body', parsed.error.flatten());
       }
 
+      const userId = (req as AuthenticatedRequest).user?.id;
+
+      if (parsed.data.async) {
+        // Create pending analysis record in database immediately
+        const pendingAnalysis = await container.prisma.analysis.create({
+          data: {
+            userId,
+            language: parsed.data.language,
+            codeHash: '',
+            sourceType: 'PASTE',
+            status: 'PENDING'
+          }
+        });
+
+        // Trigger analysis in background asynchronously
+        setImmediate(async () => {
+          try {
+            await container.prisma.analysis.update({
+              where: { id: pendingAnalysis.id },
+              data: { status: 'RUNNING' }
+            });
+            await container.orchestrator.analyzePastedCode({
+              language: parsed.data.language,
+              code: parsed.data.code,
+              userId,
+              analysisId: pendingAnalysis.id
+            });
+          } catch (bgErr) {
+            logger.error({ requestId, bgErr }, 'Async analysis failed in background');
+            await container.prisma.analysis.update({
+              where: { id: pendingAnalysis.id },
+              data: { status: 'FAILED' }
+            }).catch(() => {});
+          }
+        });
+
+        res.status(202).json({
+          success: true,
+          status: 'PENDING',
+          jobId: pendingAnalysis.id,
+          pollUrl: `/api/analyses/${pendingAnalysis.id}`
+        });
+        return;
+      }
+
+
       logger.info({ requestId, language: parsed.data.language, sourceType: 'PASTE' }, '[Analysis] Started');
 
       const result = await container.orchestrator.analyzePastedCode({
         language: parsed.data.language,
-        code: parsed.data.code
+        code: parsed.data.code,
+        userId,
+        signal: abortController.signal
       });
 
+      finished = true;
       logger.info({ requestId, analysisId: result.id, status: result.analysisStatus }, '[Analysis] Completed');
 
       res.json({ success: true, analysis: toApiShape(result) });
     } catch (err) {
+      if (abortController.signal.aborted) {
+        logger.info({ requestId }, '[Analysis] Aborted by client disconnect');
+        return;
+      }
       logger.warn({ requestId, err: err instanceof Error ? err.message : 'unknown' }, '[Analysis] Failed');
       next(err);
     }
@@ -54,6 +123,18 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
 
   router.post('/analyze/upload', zipUpload, async (req, res, next) => {
     const requestId = (req as RequestWithId).requestId;
+    const abortController = new AbortController();
+    let finished = false;
+
+    res.on('finish', () => {
+      finished = true;
+    });
+    res.on('close', () => {
+      if (!finished && !res.writableEnded) {
+        abortController.abort();
+      }
+    });
+
     try {
       if (!req.file) {
         throw new ApiError(ErrorCode.INVALID_REQUEST, 'No file uploaded (expected multipart field "file")');
@@ -61,10 +142,67 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
 
       const query = analyzeUploadQuerySchema.safeParse(req.query);
       const language = query.success && query.data.language ? query.data.language : 'auto';
+      const userId = (req as AuthenticatedRequest).user?.id;
+
+      if (query.success && query.data.async) {
+        const fileBuffer = req.file.buffer;
+        const pendingAnalysis = await container.prisma.analysis.create({
+          data: {
+            userId,
+            language,
+            codeHash: '',
+            sourceType: 'ZIP',
+            status: 'PENDING'
+          }
+        });
+
+        setImmediate(async () => {
+          try {
+            await container.prisma.analysis.update({
+              where: { id: pendingAnalysis.id },
+              data: { status: 'RUNNING' }
+            });
+
+            await withTempDir(async (tempDir) => {
+              const extracted = await container.zipService.safeExtract(fileBuffer, tempDir);
+              if (extracted.length === 0) {
+                throw new Error('Archive contained no usable files');
+              }
+
+              await container.orchestrator.analyzeProject({
+                language,
+                files: extracted.map((f) => ({ relativePath: f.relativePath, absolutePath: f.absolutePath })),
+                projectRoot: tempDir,
+                userId,
+                analysisId: pendingAnalysis.id
+              });
+            });
+          } catch (bgErr) {
+            logger.error({ requestId, bgErr }, 'Async upload analysis failed in background');
+            await container.prisma.analysis.update({
+              where: { id: pendingAnalysis.id },
+              data: { status: 'FAILED' }
+            }).catch(() => {});
+          }
+        });
+
+        res.status(202).json({
+          success: true,
+          status: 'PENDING',
+          jobId: pendingAnalysis.id,
+          pollUrl: `/api/analyses/${pendingAnalysis.id}`
+        });
+        return;
+      }
+
 
       logger.info({ requestId, language, sourceType: 'ZIP', sizeBytes: req.file.size }, '[Analysis] Started');
 
       const result = await withTempDir(async (tempDir) => {
+        if (abortController.signal.aborted) {
+          throw abortController.signal.reason ?? new Error('Aborted');
+        }
+
         const extracted = await container.zipService.safeExtract(req.file!.buffer, tempDir);
 
         if (extracted.length === 0) {
@@ -74,14 +212,21 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
         return container.orchestrator.analyzeProject({
           language,
           files: extracted.map((f) => ({ relativePath: f.relativePath, absolutePath: f.absolutePath })),
-          projectRoot: tempDir
+          projectRoot: tempDir,
+          userId,
+          signal: abortController.signal
         });
       });
 
+      finished = true;
       logger.info({ requestId, analysisId: result.id, status: result.analysisStatus }, '[Analysis] Completed');
 
       res.json({ success: true, analysis: toApiShape(result) });
     } catch (err) {
+      if (abortController.signal.aborted) {
+        logger.info({ requestId }, '[Analysis] Aborted by client disconnect');
+        return;
+      }
       logger.warn({ requestId, err: err instanceof Error ? err.message : 'unknown' }, '[Analysis] Failed');
       next(err);
     }
@@ -90,9 +235,11 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
   return router;
 }
 
+
 function toApiShape(result: Awaited<ReturnType<Container['orchestrator']['analyzePastedCode']>>) {
   return {
     id: result.id,
+    persisted: result.persisted,
     language: result.language,
     summary: result.summary,
     vulnerabilities: result.vulnerabilities,
@@ -104,3 +251,4 @@ function toApiShape(result: Awaited<ReturnType<Container['orchestrator']['analyz
     analysisStatus: result.analysisStatus ?? 'COMPLETE'
   };
 }
+

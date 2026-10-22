@@ -12,6 +12,7 @@ export interface ClassificationInput {
   sourceCode: string;
   findings: CandidateFinding[];
   securityKnowledge?: RetrievedKnowledge[];
+  signal?: AbortSignal;
 }
 
 export interface ClassificationOutput {
@@ -40,7 +41,8 @@ export class ClassificationAgent {
     const result = await generateStructured(this.llm, {
       systemPrompt: CLASSIFICATION_SYSTEM_PROMPT,
       userPrompt,
-      schema: classificationOutputSchema
+      schema: classificationOutputSchema,
+      signal: input.signal
     });
 
     return result;

@@ -62,6 +62,18 @@ describe('ZipService.safeExtract', () => {
     });
   });
 
+  it('drops .semgrepignore and .gitignore so uploads cannot hide files from the scan', async () => {
+    const zip = new AdmZip();
+    zip.addFile('.semgrepignore', Buffer.from('*'));
+    zip.addFile('sub/.gitignore', Buffer.from('*'));
+    zip.addFile('app.js', Buffer.from('x = 1;'));
+
+    await withTempDir(async (dir) => {
+      const extracted = await new ZipService().safeExtract(zip.toBuffer(), dir);
+      expect(extracted.map((f) => f.relativePath)).toEqual(['app.js']);
+    });
+  });
+
   it('rejects archives exceeding the configured ZIP size limit', async () => {
     const zip = new AdmZip();
     zip.addFile('big.txt', Buffer.alloc(1024, 'a'));

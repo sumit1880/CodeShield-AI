@@ -1,34 +1,27 @@
 import { AnalysisOrchestrator } from '../../src/orchestrator/analysis.orchestrator';
 import { ErrorCode } from '../../src/utils/errors';
-import { FakeLlmService } from '../fixtures/fake-llm.service';
-import { DetectionAgent } from '../../src/agents/detection.agent';
-import { ClassificationAgent } from '../../src/agents/classification.agent';
-import { VerificationAgent } from '../../src/agents/verification.agent';
+import { FakeChatModel } from '../../src/llm/fake-chat-model';
 import { SemgrepService } from '../../src/services/semgrep/semgrep.service';
-import { RagService } from '../../src/services/rag/rag.service';
 import { CodeContextService } from '../../src/services/code-context/code-context.service';
 import { CodeSearchService } from '../../src/services/code-context/code-search.service';
-import { ManagerAgent } from '../../src/agents/manager.agent';
 
 function buildOrchestrator() {
-  const llm = new FakeLlmService();
+  const model = new FakeChatModel();
   const semgrepService = new SemgrepService();
-  const ragService = { retrieve: jest.fn().mockResolvedValue([]) } as unknown as RagService;
+  const retriever = { retrieveKnowledge: jest.fn().mockResolvedValue([]), _getRelevantDocuments: jest.fn().mockResolvedValue([]) } as any;
   const prisma = { analysis: { create: jest.fn() } } as any;
 
   const orchestrator = new AnalysisOrchestrator({
-    detectionAgent: new DetectionAgent(llm),
-    classificationAgent: new ClassificationAgent(llm),
-    verificationAgent: new VerificationAgent(llm),
-    managerAgent: new ManagerAgent(llm),
+    detectionModel: model,
+    verificationModel: model,
     semgrepService,
-    ragService,
+    retriever,
     codeContextService: new CodeContextService(),
     codeSearchService: new CodeSearchService(),
     prisma
   });
 
-  return { orchestrator, llm };
+  return { orchestrator, model };
 }
 
 describe('AnalysisOrchestrator validation (pasted code)', () => {

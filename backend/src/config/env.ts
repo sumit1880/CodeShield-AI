@@ -82,7 +82,7 @@ export const env = {
   // unless LLM_PROVIDER_ORDER says otherwise; providers with missing
   // required config are simply skipped (not treated as a failure).
   llm: {
-    providerOrder: listEnv('LLM_PROVIDER_ORDER', ['gemini', 'gemini2']),
+    providerOrder: listEnv('LLM_PROVIDER_ORDER', ['gemini', 'grok', 'llama']),
     grok: {
       apiKey: process.env.GROK_API_KEY || '',
       model: process.env.GROK_MODEL || ''
@@ -105,6 +105,8 @@ export const env = {
     windowMs: intEnv('RATE_LIMIT_WINDOW_MS', 60_000),
     maxRequests: intEnv('RATE_LIMIT_MAX_REQUESTS', 30)
   },
+
+  dailyAnalysisLimit: intEnv('DAILY_ANALYSIS_LIMIT', 30),
 
   concurrency: {
     maxConcurrentAnalyses: intEnv('MAX_CONCURRENT_ANALYSES', 3)

@@ -40,6 +40,10 @@ export class GeminiService implements LlmProvider {
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (request.signal?.aborted) {
+        throw request.signal.reason ?? new Error('Aborted');
+      }
+
       try {
         const response = await withTimeout(
           this.client.models.generateContent({
@@ -51,7 +55,8 @@ export class GeminiService implements LlmProvider {
             }
           }),
           env.ai.requestTimeoutMs,
-          `${this.name} request`
+          `${this.name} request`,
+          request.signal
         );
         const text = response.text ?? '';
         const usageMeta = (response as any).usageMetadata;
@@ -65,6 +70,10 @@ export class GeminiService implements LlmProvider {
         };
       } catch (err) {
         lastError = err;
+
+        if (request.signal?.aborted) {
+          throw request.signal.reason ?? new Error('Aborted');
+        }
 
         if (err instanceof ApiError) {
           // Timeout: don't retry indefinitely, but allow one more attempt.

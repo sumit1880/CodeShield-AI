@@ -22,6 +22,8 @@ rules:
       - pattern-either:
           - pattern: os.system($CMD)
           - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern-not: os.system("...")
+      - pattern-not: subprocess.$FUNC("...", shell=True, ...)
     metadata:
       cwe: "CWE-78"
       category: security
@@ -36,9 +38,13 @@ rules:
       - metavariable-regex:
           metavariable: $VAR
           regex: (?i)(api_?key|secret|password|token)
+      - metavariable-analysis:
+          analyzer: entropy
+          metavariable: $VAR
     metadata:
       cwe: "CWE-798"
       category: security
+
 
   - id: py-eval-usage
     languages: [python]

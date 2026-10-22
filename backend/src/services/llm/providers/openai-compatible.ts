@@ -38,6 +38,10 @@ export async function callOpenAiCompatibleChat(
   config: OpenAiCompatibleConfig,
   request: LlmRequest
 ): Promise<OpenAiCompatibleResult> {
+  if (request.signal?.aborted) {
+    throw request.signal.reason ?? new Error('Aborted');
+  }
+
   const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
 
   const body: Record<string, unknown> = {
@@ -53,6 +57,10 @@ export async function callOpenAiCompatibleChat(
   }
 
   const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (request.signal) {
+    request.signal.addEventListener('abort', onAbort, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
 
   let response;
@@ -67,6 +75,9 @@ export async function callOpenAiCompatibleChat(
       signal: controller.signal
     });
   } catch (err) {
+    if (request.signal?.aborted) {
+      throw request.signal.reason ?? new Error('Aborted');
+    }
     if ((err as Error)?.name === 'AbortError') {
       throw new ApiError(ErrorCode.AI_TIMEOUT, `Request to ${config.baseUrl} timed out after ${config.timeoutMs}ms`);
     }
@@ -76,6 +87,9 @@ export async function callOpenAiCompatibleChat(
     );
   } finally {
     clearTimeout(timer);
+    if (request.signal) {
+      request.signal.removeEventListener('abort', onAbort);
+    }
   }
 
   if (response.status === 429) {

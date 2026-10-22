@@ -30,68 +30,53 @@ Validates LLM responses before using them
 
 Applies limits and checks when handling ZIP uploads
 
-How the analysis works
+How the analysis works (LangGraph StateGraph)
 
-Source code / ZIP
-       |
-       v
-   Input checks
-       |
-       v
-     Semgrep
-       |
-       v
- Relevant code context
-       |
-       +------------------+
-       |                  |
-       v                  v
- Security knowledge    Semgrep results
-       |                  |
-       +--------+---------+
-                |
-                v
-          Detection agent
-                |
-                v
-       Classification agent
-                |
-                v
-        Verification agent
-                |
-                v
-        Final findings
-                |
-                v
-            PostgreSQL
+The analysis orchestrator executes a compiled LangGraph `StateGraph` that manages autonomous planning, specialists, tool execution, and deterministic security gates:
 
-The three agents are coordinated by the analysis orchestrator. They do not call each other directly. Each agent call goes through an LLM provider router (see "Multi-provider LLM" below) rather than talking to Gemini directly.
+```mermaid
+flowchart TD
+    START([Start]) --> Manager[Manager Agent / Planner]
+    
+    Manager -->|nextAction == DETECT| Detect[Detection Specialist]
+    Manager -->|nextAction == SEARCH_CODE| CodeSearch[Code Search Tool]
+    Manager -->|nextAction == ANALYZE_CODE| CodeAnalyze[Code Analyze Tool]
+    Manager -->|nextAction == SEARCH_SECURITY_KNOWLEDGE| RAG[RAG Security Knowledge]
+    Manager -->|nextAction == REANALYZE_FINDING| Reanalyze[Reanalysis Node]
+    Manager -->|nextAction == FINISH| Finalize[Finalize Findings]
+    Manager -->|Safety Limits Tripped| Finalize
+    
+    Detect -->|Unclassified Candidates Exist| Classify[Classification Specialist]
+    Classify -->|Unverified Findings Exist| Verify[Verification Specialist]
+    Verify -->|All Verified| Manager
+    
+    CodeSearch --> Manager
+    CodeAnalyze --> Manager
+    RAG --> Manager
+    Reanalyze --> Manager
+    
+    Finalize --> DB[(PostgreSQL + pgvector)]
+    DB --> END([Analysis Result])
+```
+
+Deterministic gates enforce that:
+1. Candidate findings produced by Detection or Semgrep **must** be batch-classified before any other action can execute.
+2. Classified findings **must** be batch-verified before the manager can take another action or conclude the analysis.
+3. Safety limits (deadline, max tool calls, max iterations) are code-enforced in graph routers, unconditionally taking priority over model decisions.
 
 Tech stack
 
-Backend
-
-Node.js
-
-TypeScript
-
-Express
-
-Prisma
-
-PostgreSQL
-
-pgvector
-
-Semgrep
-
-Google Gemini, with xAI Grok and an OpenAI-compatible Llama endpoint as fallback providers
-
-Google Sign-In (ID token verification) for authentication
-
-Zod
-
-Jest / Supertest
+Backend:
+- Node.js (18+) & TypeScript
+- Express
+- LangGraph.js (`@langchain/langgraph`) — stateful agent orchestration graph
+- LangChain.js (`@langchain/core`, `@langchain/google-genai`, `@langchain/openai`) — chat models, prompt templates, and RAG retrievers
+- Prisma & PostgreSQL with `pgvector`
+- Semgrep for static code analysis
+- Multi-provider fallback: Google Gemini (primary), xAI Grok (1st fallback), OpenAI-compatible Llama (2nd fallback)
+- Google Sign-In (ID token verification via `google-auth-library`)
+- Zod (schemas and structured output validation with single repair retry)
+- Jest / Supertest for unit and integration testing
 
 Frontend
 

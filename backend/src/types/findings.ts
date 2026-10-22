@@ -93,6 +93,7 @@ export interface VulnerabilityResponse extends BaseFindingResponse {
   verification: {
     status: ShippedVerificationStatus;
     confidence: number;
+    reason?: string;
   };
 }
 

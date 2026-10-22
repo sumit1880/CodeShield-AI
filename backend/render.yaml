@@ -12,8 +12,12 @@ services:
         value: production
       - key: GEMINI_API_KEY
         sync: false
+      - key: GEMINI_API_KEY_2
+        sync: false
       - key: GEMINI_MODEL
         value: gemini-3.6-flash
+      - key: GEMINI_MODEL_2
+        sync: false
       - key: GROK_API_KEY
         sync: false
       - key: GROK_MODEL

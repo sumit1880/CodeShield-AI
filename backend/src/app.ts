@@ -8,6 +8,7 @@ import { logger } from './utils/logger';
 import { buildContainer, Container } from './config/container';
 import { healthRouter } from './routes/health.route';
 import { buildAnalyzeRouter, AnalyzeRouterOptions } from './routes/analyze.route';
+import { buildAnalysesRouter } from './routes/analyses.route';
 import { errorHandler, notFoundHandler } from './middleware/error-handler';
 import { requestId } from './middleware/request-id';
 import { ErrorCode } from './utils/errors';
@@ -51,8 +52,13 @@ export function createApp(container: Container = buildContainer(), options: Crea
   app.use(
     '/api',
     rateLimiter,
-    buildAnalyzeRouter(container, { authMiddleware: options.authMiddleware, concurrencyLimiter: options.concurrencyLimiter })
+    buildAnalyzeRouter(container, {
+      authMiddleware: options.authMiddleware,
+      userRateLimiter: options.userRateLimiter,
+      concurrencyLimiter: options.concurrencyLimiter
+    })
   );
+  app.use('/api/analyses', rateLimiter, buildAnalysesRouter(container, { authMiddleware: options.authMiddleware }));
 
   app.use(notFoundHandler);
   app.use(errorHandler);

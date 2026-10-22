@@ -1,31 +1,26 @@
 import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
-import { DetectionAgent } from '../agents/detection.agent';
-import { ClassificationAgent } from '../agents/classification.agent';
-import { VerificationAgent } from '../agents/verification.agent';
-import { ManagerAgent } from '../agents/manager.agent';
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { SemgrepService } from '../services/semgrep/semgrep.service';
-import { RagService } from '../services/rag/rag.service';
+import { PrismaPgvectorRetriever } from '../services/rag/prisma-retriever';
 import { CodeContextService } from '../services/code-context/code-context.service';
 import { CodeSearchService } from '../services/code-context/code-search.service';
-import { createToolRegistry } from './tool-registry';
+import { buildAnalysisGraph } from '../graph/builder';
 import { withTempDir } from '../utils/temp-workspace';
 import { ApiError, ErrorCode } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { isSupportedLanguage, languageForExtension } from '../config/languages';
 import { env } from '../config/env';
-import { AnalysisState, ManagerDecision } from '../types/agent-state';
 import { SemgrepFinding, UncertainFindingResponse, VulnerabilityResponse } from '../types/findings';
+import { FinalizedFindings } from '../graph/state';
 import fs from 'fs/promises';
 import path from 'path';
 
 export interface OrchestratorDeps {
-  detectionAgent: DetectionAgent;
-  classificationAgent: ClassificationAgent;
-  verificationAgent: VerificationAgent;
-  managerAgent: ManagerAgent;
+  detectionModel: BaseChatModel;
+  verificationModel: BaseChatModel;
   semgrepService: SemgrepService;
-  ragService: RagService;
+  retriever: PrismaPgvectorRetriever;
   codeContextService: CodeContextService;
   codeSearchService: CodeSearchService;
   prisma: PrismaClient;
@@ -34,12 +29,18 @@ export interface OrchestratorDeps {
 export interface AnalyzePastedCodeInput {
   language: string;
   code: string;
+  userId?: string;
+  analysisId?: string;
+  signal?: AbortSignal;
 }
 
 export interface AnalyzeProjectInput {
-  language: string; // may be 'auto'
+  language: string;
   files: Array<{ relativePath: string; absolutePath: string }>;
   projectRoot: string;
+  userId?: string;
+  analysisId?: string;
+  signal?: AbortSignal;
 }
 
 export interface AnalysisSummary {
@@ -52,23 +53,14 @@ export interface AnalysisSummary {
 }
 
 export interface AnalysisResult {
-  id: string;
+  id?: string;
+  persisted: boolean;
   language: string;
   summary: AnalysisSummary;
   vulnerabilities: VulnerabilityResponse[];
-  /** Classified findings that are neither safely CONFIRMED nor REJECTED (see UncertainFindingResponse). */
   uncertainFindings: UncertainFindingResponse[];
-  /** True when the analysis stopped (safety limits/timeout) before every finding reached a final verdict. */
   partial: boolean;
   analysisStatus: 'COMPLETE' | 'PARTIAL';
-}
-
-/** Result of turning final agent state into the client-facing finding lists. */
-interface FinalizedFindings {
-  vulnerabilities: VulnerabilityResponse[];
-  uncertainFindings: UncertainFindingResponse[];
-  rejectedCount: number;
-  partial: boolean;
 }
 
 function hashCode(code: string): string {
@@ -79,35 +71,28 @@ function summarize(vulns: VulnerabilityResponse[]): AnalysisSummary {
   const summary: AnalysisSummary = { totalIssues: vulns.length, critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   for (const v of vulns) {
     switch (v.severity) {
-      case 'CRITICAL':
-        summary.critical++;
-        break;
-      case 'HIGH':
-        summary.high++;
-        break;
-      case 'MEDIUM':
-        summary.medium++;
-        break;
-      case 'LOW':
-        summary.low++;
-        break;
-      case 'INFO':
-        summary.info++;
-        break;
+      case 'CRITICAL': summary.critical++; break;
+      case 'HIGH':     summary.high++;     break;
+      case 'MEDIUM':   summary.medium++;   break;
+      case 'LOW':      summary.low++;      break;
+      case 'INFO':     summary.info++;     break;
     }
   }
   return summary;
 }
 
 /**
- * The orchestrator is the ONLY component responsible for sequencing the
- * three agents. Agents never call each other directly.
+ * Thin orchestrator facade.
+ * Handles workspace setup, initial Semgrep scan, source-view preparation,
+ * LangGraph execution, and Prisma persistence. The agentic pipeline itself
+ * lives in src/graph/ (StateGraph + nodes + router).
  */
 export class AnalysisOrchestrator {
   constructor(private deps: OrchestratorDeps) {}
 
   async analyzePastedCode(input: AnalyzePastedCodeInput): Promise<AnalysisResult> {
-    const { language, code } = input;
+    const { language, code, userId, analysisId: preCreatedId, signal } = input;
+    if (signal?.aborted) throw signal.reason ?? new Error('Aborted');
 
     this.validatePastedCode(language, code);
 
@@ -117,27 +102,48 @@ export class AnalysisOrchestrator {
       const filePath = path.join(tempDir, `submission${ext}`);
       await fs.writeFile(filePath, code, 'utf-8');
 
-      const semgrepFindings = await this.runSemgrepSafely(tempDir, language, 'server.js');
+      if (signal?.aborted) throw signal.reason ?? new Error('Aborted');
+
+      const semgrepFindings = await this.runSemgrepSafely(tempDir, language);
       const submissionFile = 'submission' + ext;
 
-      const result = await this.runAgenticPipeline({
+      // Bounded source view for large files
+      const lines = code.split('\n');
+      let effectiveSource = code;
+      if (lines.length > 3000) {
+        const head = lines.slice(0, 1000).join('\n');
+        const findingWindows = semgrepFindings.map((f) => {
+          const start = Math.max(0, f.lineStart - 20);
+          const end = Math.min(lines.length, f.lineEnd + 20);
+          return `// Lines ${start}-${end} (near ${f.ruleId})\n` + lines.slice(start, end).join('\n');
+        });
+        effectiveSource = [head, '// ... (middle omitted for length) ...', ...findingWindows].join('\n\n---\n\n');
+      }
+
+      const result = await this.runGraph({
         language,
-        sourceCode: code,
+        sourceCode: effectiveSource,
         semgrepFindings: semgrepFindings.map((f) => ({ ...f, file: submissionFile })),
         projectRoot: tempDir,
-        files: [submissionFile]
+        files: [submissionFile],
+        signal
       });
 
       const analysisId = await this.persist({
+        existingId: preCreatedId,
+        userId,
         language,
         codeHash: hashCode(code),
         sourceType: 'PASTE',
         durationMs: Date.now() - startedAt,
-        vulnerabilities: result.vulnerabilities
+        vulnerabilities: result.vulnerabilities,
+        uncertainFindings: result.uncertainFindings,
+        partial: result.partial
       });
 
       return {
-        id: analysisId,
+        id: analysisId ?? undefined,
+        persisted: analysisId !== null,
         language,
         summary: summarize(result.vulnerabilities),
         vulnerabilities: result.vulnerabilities,
@@ -150,7 +156,8 @@ export class AnalysisOrchestrator {
 
   async analyzeProject(input: AnalyzeProjectInput): Promise<AnalysisResult> {
     const startedAt = Date.now();
-    const { language, files, projectRoot } = input;
+    const { language, files, projectRoot, userId, analysisId: preCreatedId, signal } = input;
+    if (signal?.aborted) throw signal.reason ?? new Error('Aborted');
 
     const relevantFiles = this.deps.codeContextService.filterRelevantFiles(
       files.map((f) => ({ relativePath: f.relativePath, absolutePath: f.absolutePath, size: 0 }))
@@ -160,54 +167,58 @@ export class AnalysisOrchestrator {
       throw new ApiError(ErrorCode.INVALID_REQUEST, 'No analyzable source files found in the archive');
     }
 
-    // Determine the effective language for the run: if a specific language
-    // was requested, validate it; 'auto' is resolved per-file by semgrep's
-    // own multi-language auto config, and we tag the analysis with the
-    // dominant language for reporting purposes.
     const effectiveLanguage =
-      language && language !== 'auto' ? language : this.inferDominantLanguage(relevantFiles.map((f) => f.relativePath));
+      language && language !== 'auto'
+        ? language
+        : this.inferDominantLanguage(relevantFiles.map((f) => f.relativePath));
 
     if (language && language !== 'auto' && !isSupportedLanguage(language)) {
       throw new ApiError(ErrorCode.UNSUPPORTED_LANGUAGE, 'The selected language is not currently supported.');
     }
 
-    const semgrepFindings = await this.deps.semgrepService.scan({
-      targetDir: projectRoot,
-      language: language === 'auto' ? 'auto' : language
-    });
+    const semgrepFindings = await this.runSemgrepSafely(
+      projectRoot,
+      language === 'auto' ? 'auto' : language
+    );
 
-    // Relative-ize semgrep file paths against the project root.
     const normalizedFindings: SemgrepFinding[] = semgrepFindings.map((f) => ({
       ...f,
       file: path.relative(projectRoot, path.resolve(f.file))
     }));
 
-    const contexts = await this.deps.codeContextService.extractContextForFindings(projectRoot, normalizedFindings);
+    const contexts = await this.deps.codeContextService.extractContextForFindings(
+      projectRoot,
+      normalizedFindings
+    );
 
-    // Build a bounded "source view" for the LLM: concatenated relevant
-    // snippets only, never the whole project.
     const sourceView = contexts
       .map((c) => `// File: ${c.file} (lines ${c.startLine}-${c.endLine})\n${c.snippet}`)
       .join('\n\n---\n\n');
 
-    const result = await this.runAgenticPipeline({
+    const result = await this.runGraph({
       language: effectiveLanguage,
       sourceCode: sourceView || '// No Semgrep findings to provide context for.',
       semgrepFindings: normalizedFindings,
       projectRoot,
-      files: relevantFiles.map((f) => f.relativePath)
+      files: relevantFiles.map((f) => f.relativePath),
+      signal
     });
 
     const analysisId = await this.persist({
+      existingId: preCreatedId,
+      userId,
       language: effectiveLanguage,
-      codeHash: hashCode(relevantFiles.map((f) => f.relativePath).join('|')),
+      codeHash: await this.hashProject(relevantFiles),
       sourceType: 'ZIP',
       durationMs: Date.now() - startedAt,
-      vulnerabilities: result.vulnerabilities
+      vulnerabilities: result.vulnerabilities,
+      uncertainFindings: result.uncertainFindings,
+      partial: result.partial
     });
 
     return {
-      id: analysisId,
+      id: analysisId ?? undefined,
+      persisted: analysisId !== null,
       language: effectiveLanguage,
       summary: summarize(result.vulnerabilities),
       vulnerabilities: result.vulnerabilities,
@@ -218,202 +229,80 @@ export class AnalysisOrchestrator {
   }
 
   // -------------------------------------------------------------------
-  // Bounded autonomous multi-agent pipeline.
-  //
-  // Semgrep has already run once (see callers). From here, a Manager Agent
-  // observes compact state and repeatedly picks ONE action from a fixed
-  // safe set (see tool-registry.ts), which is validated and dispatched —
-  // the Manager never executes anything directly and cannot request
-  // arbitrary tools. The loop is bounded by hard, code-enforced safety
-  // limits (AGENT_MAX_ITERATIONS / AGENT_MAX_TOOL_CALLS / AGENT_MAX_ANALYSIS_TIME_MS),
-  // which always take priority over the Manager's own FINISH/continue choice.
+  // Graph runner — replaces the hand-written while loop.
+  // Prepares initial state, invokes the compiled LangGraph, and extracts
+  // the finalized findings from the terminal state.
   // -------------------------------------------------------------------
-  private async runAgenticPipeline(params: {
+  private async runGraph(params: {
     language: string;
     sourceCode: string;
     semgrepFindings: SemgrepFinding[];
     projectRoot: string;
     files: string[];
+    signal?: AbortSignal;
   }): Promise<FinalizedFindings> {
-    const { language, sourceCode, semgrepFindings, projectRoot, files } = params;
+    const { language, sourceCode, semgrepFindings, projectRoot, files, signal } = params;
 
-    const state: AnalysisState = {
-      goal: 'Identify, classify, and verify real security vulnerabilities in the submitted code.',
-      language,
-      files,
-      semgrepFindings,
-      candidateFindings: [],
-      classifiedFindings: [],
-      verifiedById: new Map(),
-      knowledge: [],
-      evidence: [],
-      actionsTaken: [],
-      iteration: 0,
-      toolCallCount: 0,
-      status: 'RUNNING'
-    };
+    const graph = buildAnalysisGraph({
+      detectionModel: this.deps.detectionModel,
+      verificationModel: this.deps.verificationModel,
+      retriever: this.deps.retriever,
+      semgrepService: this.deps.semgrepService,
+      codeSearchService: this.deps.codeSearchService,
+      signal
+    });
 
-    const tools = createToolRegistry(
-      {
-        detectionAgent: this.deps.detectionAgent,
-        classificationAgent: this.deps.classificationAgent,
-        verificationAgent: this.deps.verificationAgent,
-        semgrepService: this.deps.semgrepService,
-        ragService: this.deps.ragService,
-        codeSearchService: this.deps.codeSearchService
-      },
-      {
-        projectRoot,
-        language,
-        getSourceView: () =>
-          state.evidence.length === 0
-            ? sourceCode
-            : [sourceCode, '\n--- Additional evidence gathered during analysis ---', ...state.evidence].join('\n')
-      }
-    );
-
-    logger.info('[Agent] Starting security analysis');
+    logger.info('[Graph] Starting security analysis');
 
     const deadline = Date.now() + env.agent.maxAnalysisTimeMs;
-    let stopReason: 'FINISHED' | 'MAX_ITERATIONS' | 'MAX_TOOL_CALLS' | 'TIMEOUT' = 'FINISHED';
 
-    while (state.status === 'RUNNING') {
-      state.iteration++;
-
-      if (state.iteration > env.agent.maxIterations) {
-        logger.warn('[Agent] Max iterations reached, finishing');
-        stopReason = 'MAX_ITERATIONS';
-        break;
-      }
-      if (state.toolCallCount >= env.agent.maxToolCalls) {
-        logger.warn('[Agent] Max tool calls reached, finishing');
-        stopReason = 'MAX_TOOL_CALLS';
-        break;
-      }
-      if (Date.now() > deadline) {
-        logger.warn('[Agent] Max analysis time reached, finishing');
-        stopReason = 'TIMEOUT';
-        break;
-      }
-
-      // Deterministic pipeline progression: classification and verification
-      // are never left to the Manager's discretion once there is pending
-      // work for them, so the LLM cannot burn the whole time budget without
-      // the pipeline moving Detection -> Classification -> Verification.
-      // The Manager is only consulted for genuinely open choices: whether/how
-      // to detect, how to investigate an UNCERTAIN finding, or when to FINISH.
-      const forced = this.nextDeterministicAction(state);
-      const decision: ManagerDecision = forced ?? (await this.deps.managerAgent.decide(state));
-
-      if (!forced) {
-        logger.info({ action: decision.action, reason: decision.reason }, `[Agent] Decision: ${decision.action}`);
-      }
-
-      if (decision.action === 'FINISH') break;
-
-      const handler = tools[decision.action];
-      state.toolCallCount++;
-
-      try {
-        const { resultSummary } = await handler(state, decision.arguments);
-        state.actionsTaken.push({ iteration: state.iteration, action: decision.action, reason: decision.reason, resultSummary });
-        logger.info({ result: resultSummary }, `[Agent] ${decision.action} complete: ${resultSummary}`);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Unknown tool error';
-        state.actionsTaken.push({ iteration: state.iteration, action: decision.action, reason: decision.reason, error: message });
-        logger.warn({ err }, `[Tool] ${decision.action} failed; continuing`);
-      }
-    }
-
-    state.status = 'DONE';
-    logger.info('[Agent] Finalizing findings');
-    const finalized = this.finalizeFindings(state, stopReason);
-    logger.info(
-      { confirmed: finalized.vulnerabilities.length, uncertain: finalized.uncertainFindings.length, rejected: finalized.rejectedCount },
-      `[Agent] Analysis completed: ${finalized.vulnerabilities.length} confirmed, ${finalized.uncertainFindings.length} uncertain`
+    const finalState = await graph.invoke(
+      {
+        goal: 'Identify, classify, and verify real security vulnerabilities in the submitted code.',
+        language,
+        projectRoot,
+        files,
+        sourceCode,
+        semgrepFindings,
+        deadline,
+        candidateFindings: [],
+        classifiedFindings: [],
+        verifiedById: {},
+        knowledge: [],
+        evidence: [],
+        actionsTaken: [],
+        iteration: 0,
+        toolCallCount: 0,
+        stopReason: 'FINISHED',
+        nextAction: null,
+        finalized: null
+      },
+      { recursionLimit: (env.agent.maxIterations + 1) * 2 + 10 }
     );
-    logger.info(`[Agent] Analysis partial: ${finalized.partial}`);
-    return finalized;
+
+    if (!finalState.finalized) {
+      logger.warn('[Graph] No finalized findings in terminal state — returning empty result');
+      return { vulnerabilities: [], uncertainFindings: [], rejectedCount: 0, partial: false };
+    }
+
+    logger.info(
+      {
+        confirmed: finalState.finalized.vulnerabilities.length,
+        uncertain: finalState.finalized.uncertainFindings.length,
+        rejected: finalState.finalized.rejectedCount
+      },
+      '[Graph] Analysis complete'
+    );
+
+    return finalState.finalized;
   }
 
-  /**
-   * Fixed, code-enforced priority (equivalent to):
-   *   IF unclassified candidates exist       -> CLASSIFY_FINDING
-   *   ELSE IF unverified classified findings  -> VERIFY_FINDING
-   *   ELSE                                    -> null (let the Manager decide)
-   * This guarantees Detection -> Classification -> Verification ordering and
-   * that verification always gets priority right after classification,
-   * without spending an LLM call on a decision that isn't actually a choice.
-   */
-  private nextDeterministicAction(state: AnalysisState): ManagerDecision | null {
-    const classifiedIds = new Set(state.classifiedFindings.map((f) => f.id));
-    const unclassified = state.candidateFindings.filter((f) => !classifiedIds.has(f.id));
-    if (unclassified.length > 0) {
-      return { action: 'CLASSIFY_FINDING', arguments: {}, reason: `${unclassified.length} candidate finding(s) pending classification.` };
-    }
-
-    const unverified = state.classifiedFindings.filter((f) => !state.verifiedById.has(f.id));
-    if (unverified.length > 0) {
-      return { action: 'VERIFY_FINDING', arguments: {}, reason: `${unverified.length} classified finding(s) pending verification.` };
-    }
-
-    return null;
-  }
-
-  private finalizeFindings(state: AnalysisState, stopReason: 'FINISHED' | 'MAX_ITERATIONS' | 'MAX_TOOL_CALLS' | 'TIMEOUT'): FinalizedFindings {
-    const vulnerabilities: VulnerabilityResponse[] = [];
-    const uncertainFindings: UncertainFindingResponse[] = [];
-    let rejectedCount = 0;
-
-    for (const finding of state.classifiedFindings) {
-      const verdict = state.verifiedById.get(finding.id);
-      const base = {
-        id: finding.id,
-        title: finding.title,
-        cwe: finding.cwe,
-        severity: finding.severity,
-        confidence: finding.confidence,
-        location: finding.location,
-        explanation: finding.explanation,
-        recommendation: finding.recommendation
-      };
-
-      if (verdict?.status === 'CONFIRMED') {
-        vulnerabilities.push({ ...base, verification: { status: 'CONFIRMED', confidence: verdict.confidence } });
-      } else if (verdict?.status === 'REJECTED') {
-        // Verified and explicitly rejected: never reported as a vulnerability.
-        rejectedCount++;
-      } else if (verdict?.status === 'UNCERTAIN') {
-        // The Verification Agent itself could not confirm or reject it.
-        uncertainFindings.push({ ...base, verification: { status: 'UNCERTAIN', confidence: verdict.confidence, reason: verdict.reason } });
-      } else {
-        // Classified but never reached verification at all (e.g. the global
-        // timeout hit first). Must not be silently dropped nor upgraded to
-        // CONFIRMED — report it as UNVERIFIED instead.
-        uncertainFindings.push({ ...base, verification: { status: 'UNVERIFIED', confidence: finding.confidence } });
-      }
-    }
-
-    const classifiedIds = new Set(state.classifiedFindings.map((f) => f.id));
-    const unclassifiedCandidates = state.candidateFindings.filter((f) => !classifiedIds.has(f.id)).length;
-    const partial = stopReason !== 'FINISHED' || unclassifiedCandidates > 0 || uncertainFindings.length > 0;
-
-    if (uncertainFindings.length > 0 || unclassifiedCandidates > 0) {
-      logger.warn(
-        { uncertain: uncertainFindings.length, unclassifiedCandidates, stopReason },
-        '[Agent] Finished with uncertain/unclassified findings; returning them separately instead of dropping them'
-      );
-    }
-
-    return { vulnerabilities, uncertainFindings, rejectedCount, partial };
-  }
-
-  private async runSemgrepSafely(dir: string, language: string, _hint: string): Promise<SemgrepFinding[]> {
+  private async runSemgrepSafely(dir: string, language: string): Promise<SemgrepFinding[]> {
     try {
       return await this.deps.semgrepService.scan({ targetDir: dir, language });
     } catch (err) {
       if (err instanceof ApiError && err.code === ErrorCode.SEMGREP_NOT_INSTALLED) {
-        logger.error('Semgrep is not installed; continuing with LLM-only detection (no Semgrep evidence).');
+        logger.error('Semgrep not installed; continuing with LLM-only detection.');
         return [];
       }
       throw err;
@@ -421,47 +310,92 @@ export class AnalysisOrchestrator {
   }
 
   private async persist(params: {
+    existingId?: string;
+    userId?: string;
     language: string;
     codeHash: string;
     sourceType: 'PASTE' | 'ZIP';
     durationMs: number;
     vulnerabilities: VulnerabilityResponse[];
-  }): Promise<string> {
+    uncertainFindings: UncertainFindingResponse[];
+    partial: boolean;
+  }): Promise<string | null> {
     try {
+      const confirmedRows = params.vulnerabilities.map((v) => ({
+        title: v.title,
+        cweId: v.cwe.id,
+        cweName: v.cwe.name,
+        severity: v.severity,
+        confidence: v.confidence,
+        file: v.location.file,
+        function: v.location.function ?? undefined,
+        lineStart: v.location.lineStart,
+        lineEnd: v.location.lineEnd,
+        explanation: v.explanation,
+        recommendation: v.recommendation,
+        verificationStatus: 'CONFIRMED' as const,
+        verificationReason: v.verification.reason ?? v.explanation
+      }));
+
+      const uncertainRows = params.uncertainFindings.map((u) => ({
+        title: u.title,
+        cweId: u.cwe.id,
+        cweName: u.cwe.name,
+        severity: u.severity,
+        confidence: u.confidence,
+        file: u.location.file,
+        function: u.location.function ?? undefined,
+        lineStart: u.location.lineStart,
+        lineEnd: u.location.lineEnd,
+        explanation: u.explanation,
+        recommendation: u.recommendation,
+        verificationStatus: 'UNCERTAIN' as const,
+        verificationReason: u.verification.reason ?? 'Analysis did not reach a final verdict'
+      }));
+
+      if (params.existingId) {
+        await this.deps.prisma.analysis.update({
+          where: { id: params.existingId },
+          data: {
+            status: params.partial ? 'PARTIAL' : 'COMPLETED',
+            completedAt: new Date(),
+            durationMs: params.durationMs,
+            findings: { create: [...confirmedRows, ...uncertainRows] }
+          }
+        });
+        return params.existingId;
+      }
+
       const analysis = await this.deps.prisma.analysis.create({
         data: {
+          userId: params.userId,
           language: params.language,
           codeHash: params.codeHash,
           sourceType: params.sourceType,
-          status: 'COMPLETED',
+          status: params.partial ? 'PARTIAL' : 'COMPLETED',
           completedAt: new Date(),
           durationMs: params.durationMs,
-          findings: {
-            create: params.vulnerabilities.map((v) => ({
-              title: v.title,
-              cweId: v.cwe.id,
-              cweName: v.cwe.name,
-              severity: v.severity,
-              confidence: v.confidence,
-              file: v.location.file,
-              function: v.location.function ?? undefined,
-              lineStart: v.location.lineStart,
-              lineEnd: v.location.lineEnd,
-              explanation: v.explanation,
-              recommendation: v.recommendation,
-              verificationStatus: v.verification.status,
-              verificationReason: 'See explanation'
-            }))
-          }
+          findings: { create: [...confirmedRows, ...uncertainRows] }
         }
       });
       return analysis.id;
     } catch (err) {
       logger.error({ err }, 'Failed to persist analysis; returning results without storage');
-      // Persistence is important but should not block returning results to
-      // the caller if the DB is temporarily unavailable in this prototype.
-      return crypto.randomUUID();
+      return null;
     }
+  }
+
+  private async hashProject(files: Array<{ relativePath: string; absolutePath: string }>): Promise<string> {
+    const h = crypto.createHash('sha256');
+    for (const f of [...files].sort((a, b) => a.relativePath.localeCompare(b.relativePath))) {
+      h.update(f.relativePath);
+      try {
+        h.update(await fs.readFile(f.absolutePath));
+      } catch {
+        // unreadable file — path alone goes into the hash
+      }
+    }
+    return h.digest('hex');
   }
 
   private validatePastedCode(language: string, code: string) {
@@ -482,16 +416,8 @@ export class AnalysisOrchestrator {
 
   private guessExtension(language: string): string {
     const map: Record<string, string> = {
-      javascript: '.js',
-      typescript: '.ts',
-      python: '.py',
-      java: '.java',
-      go: '.go',
-      c: '.c',
-      cpp: '.cpp',
-      ruby: '.rb',
-      php: '.php',
-      csharp: '.cs'
+      javascript: '.js', typescript: '.ts', python: '.py', java: '.java',
+      go: '.go', c: '.c', cpp: '.cpp', ruby: '.rb', php: '.php', csharp: '.cs'
     };
     return map[language] || '.txt';
   }
@@ -507,10 +433,7 @@ export class AnalysisOrchestrator {
     let best = '';
     let bestCount = -1;
     for (const [langId, count] of counts) {
-      if (count > bestCount) {
-        best = langId;
-        bestCount = count;
-      }
+      if (count > bestCount) { best = langId; bestCount = count; }
     }
     return best || 'unknown';
   }
