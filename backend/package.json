@@ -4,7 +4,8 @@
   "description": "Agentic AI Vulnerability Detection System - backend",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "prisma generate && tsc -p tsconfig.json",
+    "postinstall": "prisma generate",
     "start": "node dist/server.js",
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "test": "jest --runInBand",
