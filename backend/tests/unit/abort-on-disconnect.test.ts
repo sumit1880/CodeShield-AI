@@ -1,26 +1,20 @@
+import { FakeChatModel } from '../../src/llm/fake-chat-model';
 import { FakeLlmService } from '../fixtures/fake-llm.service';
-import { DetectionAgent } from '../../src/agents/detection.agent';
-import { ClassificationAgent } from '../../src/agents/classification.agent';
-import { VerificationAgent } from '../../src/agents/verification.agent';
-import { ManagerAgent } from '../../src/agents/manager.agent';
 import { AnalysisOrchestrator } from '../../src/orchestrator/analysis.orchestrator';
 import { SemgrepService } from '../../src/services/semgrep/semgrep.service';
-import { RagService } from '../../src/services/rag/rag.service';
 import { CodeContextService } from '../../src/services/code-context/code-context.service';
 import { CodeSearchService } from '../../src/services/code-context/code-search.service';
 
-function buildOrchestrator(llm: FakeLlmService) {
+function buildOrchestrator(model: FakeChatModel) {
   const semgrepService = new SemgrepService();
-  const ragService = { retrieve: jest.fn().mockResolvedValue([]) } as unknown as RagService;
+  const retriever = { retrieveKnowledge: jest.fn().mockResolvedValue([]), _getRelevantDocuments: jest.fn().mockResolvedValue([]) } as any;
   const prisma = { analysis: { create: jest.fn().mockResolvedValue({ id: 'analysis-1' }) } } as any;
 
   return new AnalysisOrchestrator({
-    detectionAgent: new DetectionAgent(llm),
-    classificationAgent: new ClassificationAgent(llm),
-    verificationAgent: new VerificationAgent(llm),
-    managerAgent: new ManagerAgent(llm),
+    detectionModel: model,
+    verificationModel: model,
     semgrepService,
-    ragService,
+    retriever,
     codeContextService: new CodeContextService(),
     codeSearchService: new CodeSearchService(),
     prisma
@@ -29,13 +23,13 @@ function buildOrchestrator(llm: FakeLlmService) {
 
 describe('Abort on client disconnect', () => {
   it('aborts the analysis when signal is triggered before LLM responds', async () => {
-    const llm = new FakeLlmService();
+    const model = new FakeChatModel();
 
-    // Manager decides to detect; detection agent will hang until abort
-    llm.enqueue({ action: 'DETECT_VULNERABILITIES', arguments: {}, reason: 'start' });
-    llm.enqueueHang(); // detection LLM call hangs
+    // Manager decides to detect; detection model hangs until abort
+    model.enqueue({ action: 'DETECT_VULNERABILITIES', arguments: {}, reason: 'start' });
+    model.enqueueHang(); // detection LLM call hangs
 
-    const orchestrator = buildOrchestrator(llm);
+    const orchestrator = buildOrchestrator(model);
     const abortController = new AbortController();
 
     const analysisPromise = orchestrator.analyzePastedCode({
@@ -52,8 +46,8 @@ describe('Abort on client disconnect', () => {
   });
 
   it('aborts immediately if signal is already aborted before starting', async () => {
-    const llm = new FakeLlmService();
-    const orchestrator = buildOrchestrator(llm);
+    const model = new FakeChatModel();
+    const orchestrator = buildOrchestrator(model);
 
     const abortController = new AbortController();
     abortController.abort(); // already aborted
@@ -67,10 +61,12 @@ describe('Abort on client disconnect', () => {
     ).rejects.toThrow();
 
     // No LLM calls should have been made
-    expect(llm.calls).toHaveLength(0);
+    expect(model.calls).toHaveLength(0);
   });
 
-  it('FakeLlmService.enqueueHang rejects on abort signal', async () => {
+  it('FakeLlmService.enqueueHang rejects on abort signal (backward-compat)', async () => {
+    // This test exercises the old FakeLlmService directly (not the orchestrator)
+    // to ensure existing test infrastructure still works.
     const llm = new FakeLlmService();
     llm.enqueueHang();
 

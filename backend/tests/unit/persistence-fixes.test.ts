@@ -5,26 +5,42 @@
  *  - UNCERTAIN findings are persisted
  *  - Status is PARTIAL when partial=true
  *  - persisted:false is returned (not a fake UUID) when DB save fails
+ *
+ * Migrated to use FakeChatModel + new OrchestratorDeps (LangGraph pipeline).
  */
 import { AnalysisOrchestrator } from '../../src/orchestrator/analysis.orchestrator';
-import { DetectionAgent } from '../../src/agents/detection.agent';
-import { ClassificationAgent } from '../../src/agents/classification.agent';
-import { VerificationAgent } from '../../src/agents/verification.agent';
-import { ManagerAgent } from '../../src/agents/manager.agent';
 import { SemgrepService } from '../../src/services/semgrep/semgrep.service';
-import { RagService } from '../../src/services/rag/rag.service';
 import { CodeContextService } from '../../src/services/code-context/code-context.service';
 import { CodeSearchService } from '../../src/services/code-context/code-search.service';
-import { FakeLlmService } from '../fixtures/fake-llm.service';
+import { FakeChatModel } from '../../src/llm/fake-chat-model';
 
 function managerDecision(action: string, reason: string, args: Record<string, unknown> = {}) {
   return { action, arguments: args, reason };
 }
 
+function buildOrchestrator(model: FakeChatModel, prismaCreateMock: jest.Mock, verificationModel?: FakeChatModel) {
+  const semgrepService = new SemgrepService();
+  const retriever = {
+    retrieveKnowledge: jest.fn().mockResolvedValue([]),
+    _getRelevantDocuments: jest.fn().mockResolvedValue([])
+  } as any;
+  const prisma = { analysis: { create: prismaCreateMock } } as any;
+
+  return new AnalysisOrchestrator({
+    detectionModel: model,
+    verificationModel: verificationModel ?? model,
+    semgrepService,
+    retriever,
+    codeContextService: new CodeContextService(),
+    codeSearchService: new CodeSearchService(),
+    prisma
+  });
+}
+
 /**
  * Build an orchestrator whose LLM queue produces a single CONFIRMED SQLi finding.
  *
- * Sequence matches the deterministic pipeline (see orchestrator-pipeline.test.ts):
+ * Sequence in the LangGraph pipeline:
  *   1. Manager → DETECT_VULNERABILITIES
  *   2. Detection agent → {findings:[F1]}
  *   3. Classification agent (forced, no Manager call) → {findings:[F1 classified]}
@@ -32,13 +48,13 @@ function managerDecision(action: string, reason: string, args: Record<string, un
  *   5. Manager → FINISH
  */
 function buildOrchestratorWithSQLi(prismaCreateMock: jest.Mock) {
-  const llm = new FakeLlmService();
+  const model = new FakeChatModel();
 
   // 1. Manager: detect
-  llm.enqueue(managerDecision('DETECT_VULNERABILITIES', 'No candidates yet'));
+  model.enqueue(managerDecision('DETECT_VULNERABILITIES', 'No candidates yet'));
 
   // 2. Detection: return one finding
-  llm.enqueue({
+  model.enqueue({
     findings: [
       {
         id: 'F1',
@@ -53,7 +69,7 @@ function buildOrchestratorWithSQLi(prismaCreateMock: jest.Mock) {
   });
 
   // 3. Classification: batch classify all pending (forced, no Manager call)
-  llm.enqueue({
+  model.enqueue({
     findings: [
       {
         id: 'F1',
@@ -69,7 +85,7 @@ function buildOrchestratorWithSQLi(prismaCreateMock: jest.Mock) {
   });
 
   // 4. Verification: batch verify all classified (forced, no Manager call)
-  llm.enqueue({
+  model.enqueue({
     findings: [
       {
         id: 'F1',
@@ -81,23 +97,9 @@ function buildOrchestratorWithSQLi(prismaCreateMock: jest.Mock) {
   });
 
   // 5. Manager: finish
-  llm.enqueue(managerDecision('FINISH', 'All findings verified'));
+  model.enqueue(managerDecision('FINISH', 'All findings verified'));
 
-  const semgrepService = new SemgrepService();
-  const ragService = { retrieve: jest.fn().mockResolvedValue([]) } as unknown as RagService;
-  const prisma = { analysis: { create: prismaCreateMock } } as any;
-
-  return new AnalysisOrchestrator({
-    detectionAgent: new DetectionAgent(llm),
-    classificationAgent: new ClassificationAgent(llm),
-    verificationAgent: new VerificationAgent(llm),
-    managerAgent: new ManagerAgent(llm),
-    semgrepService,
-    ragService,
-    codeContextService: new CodeContextService(),
-    codeSearchService: new CodeSearchService(),
-    prisma
-  });
+  return buildOrchestrator(model, prismaCreateMock);
 }
 
 const SAMPLE_CODE = `
@@ -165,13 +167,13 @@ describe('Persistence fixes (task 5)', () => {
   }, 30000);
 
   it('sets status PARTIAL and persists uncertain findings when analysis is incomplete', async () => {
-    const llm = new FakeLlmService();
+    const model = new FakeChatModel();
 
     // Manager: detect
-    llm.enqueue(managerDecision('DETECT_VULNERABILITIES', 'first pass'));
+    model.enqueue(managerDecision('DETECT_VULNERABILITIES', 'first pass'));
 
     // Detection: one finding
-    llm.enqueue({
+    model.enqueue({
       findings: [
         {
           id: 'F1',
@@ -185,8 +187,8 @@ describe('Persistence fixes (task 5)', () => {
       ]
     });
 
-    // Classification: classified but verified as UNCERTAIN
-    llm.enqueue({
+    // Classification: classified but will be verified as UNCERTAIN
+    model.enqueue({
       findings: [
         {
           id: 'F1',
@@ -202,28 +204,14 @@ describe('Persistence fixes (task 5)', () => {
     });
 
     // Verification: UNCERTAIN verdict
-    llm.enqueue({
+    model.enqueue({
       findings: [{ id: 'F1', status: 'UNCERTAIN', confidence: 0.5, reason: 'Cannot determine if input is user-controlled.' }]
     });
 
-    llm.enqueue(managerDecision('FINISH', 'done'));
+    model.enqueue(managerDecision('FINISH', 'done'));
 
     const create = jest.fn().mockResolvedValue({ id: 'analysis-partial' });
-    const prisma = { analysis: { create } } as any;
-    const semgrepService = new SemgrepService();
-    const ragService = { retrieve: jest.fn().mockResolvedValue([]) } as unknown as RagService;
-
-    const orchestrator = new AnalysisOrchestrator({
-      detectionAgent: new DetectionAgent(llm),
-      classificationAgent: new ClassificationAgent(llm),
-      verificationAgent: new VerificationAgent(llm),
-      managerAgent: new ManagerAgent(llm),
-      semgrepService,
-      ragService,
-      codeContextService: new CodeContextService(),
-      codeSearchService: new CodeSearchService(),
-      prisma
-    });
+    const orchestrator = buildOrchestrator(model, create);
 
     const result = await orchestrator.analyzePastedCode({
       language: 'javascript',

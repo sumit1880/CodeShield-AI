@@ -1,110 +1,52 @@
-import { createToolRegistry, ToolRegistryDeps, ToolContext } from '../../src/orchestrator/tool-registry';
-import { AnalysisState } from '../../src/types/agent-state';
+/**
+ * Tests that the candidate finding deduplication and server-side ID assignment
+ * logic works correctly. These semantics now live in the graph state reducer.
+ */
+import { dedupeCandidateFindings } from '../../src/graph/state';
 import { CandidateFinding } from '../../src/types/findings';
 
-describe('Server-side finding IDs and dedupeMerge', () => {
-  it('assigns unique server-side IDs and avoids collisions across multiple detection passes', async () => {
-    const mockDetectionAgent = {
-      run: jest.fn()
-    } as any;
+describe('Server-side finding IDs and dedupeCandidateFindings reducer', () => {
+  it('assigns stable sequential IDs and deduplicates across multiple detection passes', () => {
+    // First detection pass: two new findings from LLM with arbitrary IDs
+    const pass1: CandidateFinding[] = [
+      { id: 'F1', title: 'SQL Injection', category: 'Injection', evidence: 'query()', file: 'db.js', lineStart: 10, lineEnd: 12 },
+      { id: 'F2', title: 'XSS', category: 'Injection', evidence: 'innerHTML', file: 'view.js', lineStart: 20, lineEnd: 22 }
+    ];
 
-    const deps: ToolRegistryDeps = {
-      detectionAgent: mockDetectionAgent,
-      classificationAgent: {} as any,
-      verificationAgent: {} as any,
-      semgrepService: {} as any,
-      ragService: {} as any,
-      codeSearchService: {} as any
-    };
+    const afterPass1 = dedupeCandidateFindings([], pass1);
 
-    const ctx: ToolContext = {
-      projectRoot: '/tmp/test',
-      language: 'javascript',
-      getSourceView: () => 'const a = 1;'
-    };
+    expect(afterPass1).toHaveLength(2);
+    expect(afterPass1[0].id).toBe('finding-1');
+    expect(afterPass1[0].title).toBe('SQL Injection');
+    expect(afterPass1[1].id).toBe('finding-2');
+    expect(afterPass1[1].title).toBe('XSS');
 
-    const tools = createToolRegistry(deps, ctx);
+    // Second detection pass: one genuinely new finding and one duplicate (same title+file+lineStart)
+    const pass2: CandidateFinding[] = [
+      { id: 'F1', title: 'Command Injection', category: 'Injection', evidence: 'exec()', file: 'exec.js', lineStart: 5, lineEnd: 6 },
+      { id: 'F2', title: 'SQL Injection', category: 'Injection', evidence: 'query()', file: 'db.js', lineStart: 10, lineEnd: 12 } // duplicate
+    ];
 
-    const state: AnalysisState = {
-      goal: 'test',
-      language: 'javascript',
-      files: ['test.js'],
-      semgrepFindings: [],
-      candidateFindings: [],
-      classifiedFindings: [],
-      verifiedById: new Map(),
-      knowledge: [],
-      evidence: [],
-      actionsTaken: [],
-      iteration: 0,
-      toolCallCount: 0,
-      status: 'RUNNING'
-    };
+    const afterPass2 = dedupeCandidateFindings(afterPass1, pass2);
 
-    // First detection pass returns candidates with LLM-generated IDs: F1, F2
-    mockDetectionAgent.run.mockResolvedValueOnce({
-      findings: [
-        {
-          id: 'F1',
-          title: 'SQL Injection',
-          category: 'Injection',
-          evidence: 'query()',
-          file: 'db.js',
-          lineStart: 10,
-          lineEnd: 12
-        },
-        {
-          id: 'F2',
-          title: 'XSS',
-          category: 'Injection',
-          evidence: 'innerHTML',
-          file: 'view.js',
-          lineStart: 20,
-          lineEnd: 22
-        }
-      ] as CandidateFinding[]
-    });
+    // Duplicate SQL Injection is dropped; new Command Injection gets finding-3
+    expect(afterPass2).toHaveLength(3);
+    expect(afterPass2[0].id).toBe('finding-1'); // unchanged
+    expect(afterPass2[1].id).toBe('finding-2'); // unchanged
+    expect(afterPass2[2].id).toBe('finding-3'); // new
+    expect(afterPass2[2].title).toBe('Command Injection');
+  });
 
-    await tools.DETECT_VULNERABILITIES(state, {});
+  it('returns empty array when no findings provided', () => {
+    expect(dedupeCandidateFindings([], [])).toHaveLength(0);
+  });
 
-    expect(state.candidateFindings).toHaveLength(2);
-    expect(state.candidateFindings[0].id).toBe('finding-1');
-    expect(state.candidateFindings[1].id).toBe('finding-2');
-    expect(state.candidateFindings[0].title).toBe('SQL Injection');
-    expect(state.candidateFindings[1].title).toBe('XSS');
-
-    // Second detection pass returns candidates that reuse LLM IDs 'F1' and 'F2' for NEW findings
-    mockDetectionAgent.run.mockResolvedValueOnce({
-      findings: [
-        {
-          id: 'F1', // Reused LLM ID, but different finding
-          title: 'Command Injection',
-          category: 'Injection',
-          evidence: 'exec()',
-          file: 'exec.js',
-          lineStart: 5,
-          lineEnd: 6
-        },
-        {
-          id: 'F2', // Reused LLM ID and duplicate finding of the first pass
-          title: 'SQL Injection',
-          category: 'Injection',
-          evidence: 'query()',
-          file: 'db.js',
-          lineStart: 10,
-          lineEnd: 12
-        }
-      ] as CandidateFinding[]
-    });
-
-    await tools.DETECT_VULNERABILITIES(state, {});
-
-    // The duplicate SQL Injection is deduplicated, while the new Command Injection gets 'finding-3'
-    // without overwriting 'finding-1'.
-    expect(state.candidateFindings).toHaveLength(3);
-    expect(state.candidateFindings[0].id).toBe('finding-1');
-    expect(state.candidateFindings[1].id).toBe('finding-2');
-    expect(state.candidateFindings[2].id).toBe('finding-3');
-    expect(state.candidateFindings[2].title).toBe('Command Injection');
+  it('does not change IDs of existing findings when merging empty incoming', () => {
+    const existing: CandidateFinding[] = [
+      { id: 'finding-1', title: 'XSS', category: 'Injection', evidence: 'innerHTML', file: 'a.js', lineStart: 1, lineEnd: 2 }
+    ];
+    const result = dedupeCandidateFindings(existing, []);
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('finding-1');
   });
 });
