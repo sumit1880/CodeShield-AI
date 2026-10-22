@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { HistoryEntry } from '../hooks/useAnalyze';
 import { getAnalyses, getAnalysisById } from '../lib/api';
-import { AnalysisResult } from '../types/api';
 
 export function HistoryPanel({
   entries,
