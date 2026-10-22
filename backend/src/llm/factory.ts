@@ -25,17 +25,20 @@ function isFallbackWorthy(err: unknown): boolean {
 
 function isRateLimitError(err: unknown): boolean {
   const status = (err as any)?.status ?? (err as any)?.response?.status ?? (err as any)?.code;
-  return status === 429 || /rate limit|quota/i.test(String((err as any)?.message || ''));
+  return status === 429 || /rate limit|quota|resource_exhausted/i.test(String((err as any)?.message || ''));
 }
 
 function isServerError(err: unknown): boolean {
   const status = (err as any)?.status ?? (err as any)?.response?.status;
-  return typeof status === 'number' && status >= 500 && status < 600;
+  return (
+    (typeof status === 'number' && status >= 500 && status < 600) ||
+    /503|unavailable|high demand/i.test(String((err as any)?.message || ''))
+  );
 }
 
 function isTimeoutError(err: unknown): boolean {
   const msg = (err as any)?.message ?? '';
-  return /timeout|timed out/i.test(msg) || (err instanceof ApiError && err.code === ErrorCode.AI_TIMEOUT);
+  return /timeout|timed out|deadline_exceeded/i.test(msg) || (err instanceof ApiError && err.code === ErrorCode.AI_TIMEOUT);
 }
 
 /**
@@ -182,8 +185,7 @@ function buildProviderModel(name: string): { name: string; model: BaseChatModel 
 
 /**
  * Builds a LangChain BaseChatModel from the configured provider chain.
- * Single provider returns the model directly; multiple providers use
- * LangChainFallbackRouter with provider-error-only fallback semantics.
+ * Uses LangChainFallbackRouter with provider-error-only fallback semantics.
  */
 export function buildChatModel(): BaseChatModel {
   const providers = env.llm.providerOrder
@@ -198,5 +200,5 @@ export function buildChatModel(): BaseChatModel {
 
   logger.info({ providers: providers.map((p) => p.name) }, '[LLM] Configured provider chain');
 
-  return providers.length === 1 ? providers[0].model : new LangChainFallbackRouter(providers);
+  return new LangChainFallbackRouter(providers);
 }

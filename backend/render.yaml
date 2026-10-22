@@ -15,7 +15,7 @@ services:
       - key: GEMINI_API_KEY_2
         sync: false
       - key: GEMINI_MODEL
-        value: gemini-3.6-flash
+        value: gemini-2.0-flash
       - key: GEMINI_MODEL_2
         sync: false
       - key: GROK_API_KEY
@@ -29,7 +29,7 @@ services:
       - key: LLAMA_MODEL
         sync: false
       - key: LLM_PROVIDER_ORDER
-        value: gemini,grok,llama
+        value: gemini,gemini2,grok,llama
       - key: EMBEDDING_MODEL
         value: text-embedding-004
       - key: DATABASE_URL

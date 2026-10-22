@@ -4,6 +4,7 @@ import { MANAGER_SYSTEM_PROMPT, buildManagerCompactState } from '../../prompts/m
 import { managerDecisionSchema } from '../../schemas/manager.schema';
 import { ManagerDecision, AGENT_ACTIONS } from '../../types/agent-state';
 import { logger } from '../../utils/logger';
+import { ApiError, ErrorCode } from '../../utils/errors';
 import { AnalysisGraphState, AnalysisGraphUpdate } from '../state';
 
 interface ManagerNodeDeps {
@@ -43,11 +44,14 @@ export function managerNode(deps: ManagerNodeDeps) {
         signal: deps.signal
       });
     } catch (err) {
-      logger.warn({ err }, '[Node:manager] Manager decision invalid or rejected by schema, defaulting to FINISH');
-      return {
-        nextAction: { action: 'FINISH', arguments: {}, reason: 'Unknown or invalid action, defaulting to FINISH' },
-        iteration: state.iteration + 1
-      };
+      if (err instanceof ApiError && err.code === ErrorCode.INVALID_AI_RESPONSE) {
+        logger.warn({ err }, '[Node:manager] Manager decision invalid or rejected by schema, defaulting to FINISH');
+        return {
+          nextAction: { action: 'FINISH', arguments: {}, reason: 'Unknown or invalid action, defaulting to FINISH' },
+          iteration: state.iteration + 1
+        };
+      }
+      throw err;
     }
 
     // Validate the action is within the fixed allow-list

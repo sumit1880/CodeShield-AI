@@ -157,6 +157,28 @@ describe('Phase 4: LangGraph Routing & LangChain LLM Tests', () => {
       expect((update.nextAction as any)?.action).toBe('FINISH');
       expect((update.nextAction as any)?.reason).toMatch(/defaulting to FINISH/i);
     });
+
+    it('defaults to FINISH when schema validation fails after repair attempt', async () => {
+      const model = new FakeChatModel();
+      model.enqueue('completely broken response {{{');
+      model.enqueue('still broken response {{{');
+
+      const node = managerNode({ model });
+      const update = await node(makeMockState());
+
+      expect((update.nextAction as any)?.action).toBe('FINISH');
+      expect((update.nextAction as any)?.reason).toMatch(/defaulting to FINISH/i);
+    });
+
+    it('rethrows provider/network errors (e.g. 503 or AI_PROVIDER_ERROR) without defaulting to FINISH', async () => {
+      const model = new FakeChatModel();
+      jest.spyOn(model, '_generate').mockRejectedValueOnce(
+        new ApiError(ErrorCode.AI_PROVIDER_ERROR, 'Google 503 high demand')
+      );
+
+      const node = managerNode({ model });
+      await expect(node(makeMockState())).rejects.toThrow('Google 503 high demand');
+    });
   });
 
   describe('Structured-Output Repair Loop', () => {

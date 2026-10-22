@@ -1,7 +1,7 @@
 // Ensures tests never require real external services / secrets.
 process.env.NODE_ENV = 'test';
 process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-key-not-real';
-process.env.GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+process.env.GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 process.env.EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-004';
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://user:pass@localhost:5432/testdb';
 process.env.MAX_CODE_LINES = process.env.MAX_CODE_LINES || '10000';

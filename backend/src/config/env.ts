@@ -37,7 +37,7 @@ export const env = {
   // existing tests/config already depend on env.gemini.{apiKey,model}.
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
-    model: process.env.GEMINI_MODEL || 'gemini-3.6-flash'
+    model: process.env.GEMINI_MODEL || 'gemini-2.0-flash'
   },
 
   // Second Gemini account, used as a fallback when the primary key hits a
@@ -46,7 +46,7 @@ export const env = {
   // different account.
   gemini2: {
     apiKey: process.env.GEMINI_API_KEY_2 || '',
-    model: process.env.GEMINI_MODEL_2 || process.env.GEMINI_MODEL || 'gemini-3.6-flash'
+    model: process.env.GEMINI_MODEL_2 || process.env.GEMINI_MODEL || 'gemini-2.0-flash'
   },
 
   embeddingModel: process.env.EMBEDDING_MODEL || 'text-embedding-004',
@@ -82,7 +82,7 @@ export const env = {
   // unless LLM_PROVIDER_ORDER says otherwise; providers with missing
   // required config are simply skipped (not treated as a failure).
   llm: {
-    providerOrder: listEnv('LLM_PROVIDER_ORDER', ['gemini', 'grok', 'llama']),
+    providerOrder: listEnv('LLM_PROVIDER_ORDER', ['gemini', 'gemini2', 'grok', 'llama']),
     grok: {
       apiKey: process.env.GROK_API_KEY || '',
       model: process.env.GROK_MODEL || ''
