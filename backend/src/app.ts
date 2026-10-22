@@ -26,8 +26,43 @@ export function createApp(container: Container = buildContainer(), options: Crea
   // instead of the proxy's own address.
   app.set('trust proxy', 1);
 
-  app.use(helmet());
-  app.use(cors({ origin: env.corsOrigin }));
+  app.use(
+    helmet({
+      crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' }
+    })
+  );
+
+  const configuredOrigins = (env.corsOrigin || '')
+    .split(',')
+    .map((o) => o.trim().replace(/\/$/, ''))
+    .filter(Boolean);
+
+  const defaultOrigins = ['http://localhost:5173'];
+  const allowedOrigins = Array.from(new Set([...defaultOrigins, ...configuredOrigins]));
+
+  app.use(
+    cors({
+      origin: (origin, callback) => {
+        // Allow server-to-server, curl, mobile apps, or local same-origin without Origin header
+        if (!origin) return callback(null, true);
+
+        const normalized = origin.replace(/\/$/, '');
+        if (
+          allowedOrigins.includes('*') ||
+          allowedOrigins.includes(normalized) ||
+          /^https:\/\/.*\.vercel\.app$/.test(normalized)
+        ) {
+          return callback(null, true);
+        }
+
+        logger.warn({ origin }, '[CORS] Origin rejected');
+        callback(null, false);
+      },
+      credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+    })
+  );
   app.use(requestId);
   // Body size is capped well above the analyzer's own MAX_CODE_CHARACTERS
   // check but far below anything that could meaningfully exhaust memory;
