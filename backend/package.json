@@ -27,7 +27,7 @@
     "@langchain/langgraph": "^1.5.2",
     "@langchain/openai": "^1.6.3",
     "@prisma/client": "^5.20.0",
-    "adm-zip": "^0.5.16",
+    "adm-zip": "^0.6.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
