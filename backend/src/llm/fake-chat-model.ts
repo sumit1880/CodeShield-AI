@@ -7,6 +7,7 @@ interface QueuedResponse {
   text: string;
   delayMs?: number;
   hangUntilAbort?: boolean;
+  error?: Error;
 }
 
 /**
@@ -38,6 +39,12 @@ export class FakeChatModel extends BaseChatModel {
     return this;
   }
 
+  /** Enqueue an error to be thrown on the next invocation. */
+  enqueueError(error: Error): this {
+    this.queue.push({ text: '', error });
+    return this;
+  }
+
   async _generate(
     messages: BaseMessage[],
     _options: this['ParsedCallOptions'],
@@ -48,6 +55,11 @@ export class FakeChatModel extends BaseChatModel {
     const next = this.queue.shift();
     if (next === undefined) {
       throw new Error('FakeChatModel: no more queued responses');
+    }
+
+    // Throw queued error
+    if (next.error) {
+      throw next.error;
     }
 
     if (next.hangUntilAbort) {

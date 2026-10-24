@@ -37,7 +37,7 @@ export function createApp(container: Container = buildContainer(), options: Crea
     .map((o) => o.trim().replace(/\/$/, ''))
     .filter(Boolean);
 
-  const defaultOrigins = ['http://localhost:5173'];
+  const defaultOrigins: string[] = []; // No wildcard when credentials are required
   const allowedOrigins = Array.from(new Set([...defaultOrigins, ...configuredOrigins]));
 
   app.use(

@@ -27,6 +27,15 @@ function listEnv(name: string, fallback: string[]): string[] {
   return parsed.length > 0 ? parsed : fallback;
 }
 
+function sanitizeGeminiModel(raw?: string): string {
+  if (!raw) return 'gemini-1.5-flash';
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('gemini-3') || trimmed === 'gemini-3.6-flash') {
+    return 'gemini-1.5-flash';
+  }
+  return trimmed;
+}
+
 export const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: intEnv('PORT', 3000),
@@ -37,7 +46,7 @@ export const env = {
   // existing tests/config already depend on env.gemini.{apiKey,model}.
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
-    model: process.env.GEMINI_MODEL || 'gemini-2.0-flash'
+    model: sanitizeGeminiModel(process.env.GEMINI_MODEL)
   },
 
   // Second Gemini account, used as a fallback when the primary key hits a
@@ -46,7 +55,7 @@ export const env = {
   // different account.
   gemini2: {
     apiKey: process.env.GEMINI_API_KEY_2 || '',
-    model: process.env.GEMINI_MODEL_2 || process.env.GEMINI_MODEL || 'gemini-2.0-flash'
+    model: sanitizeGeminiModel(process.env.GEMINI_MODEL_2 || process.env.GEMINI_MODEL)
   },
 
   embeddingModel: process.env.EMBEDDING_MODEL || 'text-embedding-004',

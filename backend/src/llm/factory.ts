@@ -10,8 +10,10 @@ const XAI_BASE_URL = 'https://api.x.ai/v1';
 
 /**
  * Error codes that represent provider-side infrastructure failures:
- * rate limit, timeout, 5xx, outage. Only these trigger fallback to the next
- * provider. Schema validation / parse errors must NOT cause fallback.
+ * rate limit, timeout, 5xx, outage, empty response. Only these trigger
+ * fallback to the next provider. Schema validation / parse errors from
+ * INVALID_AI_RESPONSE must NOT cause fallback (the same model will
+ * produce the same bad schema on retry).
  */
 const PROVIDER_ERROR_CODES = new Set<string>([
   ErrorCode.AI_RATE_LIMIT,
@@ -19,54 +21,97 @@ const PROVIDER_ERROR_CODES = new Set<string>([
   ErrorCode.AI_PROVIDER_ERROR
 ]);
 
-function isFallbackWorthy(err: unknown): boolean {
-  return err instanceof ApiError && PROVIDER_ERROR_CODES.has(err.code);
+export function isFallbackWorthy(err: unknown): boolean {
+  if (err instanceof ApiError && PROVIDER_ERROR_CODES.has(err.code)) {
+    return true;
+  }
+  // Raw errors (not ApiError) from LangChain SDK should also trigger fallback
+  // if they look like transient provider issues
+  if (!(err instanceof ApiError) && err instanceof Error) {
+    const msg = err.message || '';
+    if (/model output.*(empty|must contain)/i.test(msg)) return true;
+    if (/rate limit|quota|resource_exhausted|429/i.test(msg)) return true;
+    if (/5\d{2}|unavailable|high demand/i.test(msg)) return true;
+    if (/timeout|timed out|deadline_exceeded|408/i.test(msg)) return true;
+    if (/ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up|fetch failed/i.test(msg)) return true;
+  }
+  return false;
 }
 
-function isRateLimitError(err: unknown): boolean {
+export function isRateLimitError(err: unknown): boolean {
   const status = (err as any)?.status ?? (err as any)?.response?.status ?? (err as any)?.code;
   return status === 429 || /rate limit|quota|resource_exhausted/i.test(String((err as any)?.message || ''));
 }
 
-function isServerError(err: unknown): boolean {
+export function isServerError(err: unknown): boolean {
   const status = (err as any)?.status ?? (err as any)?.response?.status;
   return (
     (typeof status === 'number' && status >= 500 && status < 600) ||
-    /503|unavailable|high demand/i.test(String((err as any)?.message || ''))
+    /503|502|504|500|unavailable|high demand/i.test(String((err as any)?.message || ''))
   );
 }
 
-function isTimeoutError(err: unknown): boolean {
+export function isTimeoutError(err: unknown): boolean {
+  const status = (err as any)?.status ?? (err as any)?.response?.status;
   const msg = (err as any)?.message ?? '';
-  return /timeout|timed out|deadline_exceeded/i.test(msg) || (err instanceof ApiError && err.code === ErrorCode.AI_TIMEOUT);
+  return (
+    status === 408 ||
+    /timeout|timed out|deadline_exceeded|408/i.test(msg) ||
+    (err instanceof ApiError && err.code === ErrorCode.AI_TIMEOUT)
+  );
+}
+
+export function isEmptyOutputError(err: unknown): boolean {
+  const msg = (err as any)?.message ?? '';
+  return /model output.*(empty|must contain)/i.test(msg);
 }
 
 /**
  * Normalizes raw provider errors into typed ApiErrors so the router
  * can make fallback decisions without knowing each provider's SDK internals.
  */
-function normalizeProviderError(err: unknown, providerName: string): ApiError {
+export function normalizeProviderError(err: unknown, providerName: string): ApiError {
   if (err instanceof ApiError) return err;
+  const rawMsg = (err as Error)?.message || String(err) || 'unknown';
   if (isRateLimitError(err)) {
-    return new ApiError(ErrorCode.AI_RATE_LIMIT, `${providerName} API rate limit exceeded`);
+    return new ApiError(ErrorCode.AI_RATE_LIMIT, `${providerName} API rate limit exceeded: ${rawMsg}`);
   }
   if (isTimeoutError(err)) {
-    return new ApiError(ErrorCode.AI_TIMEOUT, `${providerName} API request timed out`);
+    return new ApiError(ErrorCode.AI_TIMEOUT, `${providerName} API request timed out: ${rawMsg}`);
   }
   if (isServerError(err)) {
-    return new ApiError(ErrorCode.AI_PROVIDER_ERROR, `${providerName} API server error`);
+    return new ApiError(ErrorCode.AI_PROVIDER_ERROR, `${providerName} API server error: ${rawMsg}`);
+  }
+  if (isEmptyOutputError(err)) {
+    return new ApiError(ErrorCode.AI_PROVIDER_ERROR, `${providerName} returned empty output: ${rawMsg}`);
   }
   return new ApiError(
     ErrorCode.AI_PROVIDER_ERROR,
-    `${providerName} API request failed: ${(err as Error)?.message || 'unknown'}`
+    `${providerName} API request failed: ${rawMsg}`
   );
 }
 
 /**
+ * Returns true if the error indicates a permanent configuration or
+ * authentication problem for the specific provider (e.g. invalid API key).
+ */
+export function isPermanentError(err: unknown): boolean {
+  const msg = String((err as any)?.message ?? '');
+  const status = (err as any)?.status ?? (err as any)?.response?.status;
+  // 401/403 = auth/permission errors
+  if (status === 401 || status === 403) return true;
+  if (/api.key|invalid.*key|permission.*denied|unauthorized|forbidden/i.test(msg)) return true;
+  return false;
+}
+
+/**
  * A lightweight fallback router around LangChain chat models.
- * Falls back to the next model ONLY when the current one throws a
- * provider-side error (rate limit, timeout, 5xx). Schema validation
- * errors propagate immediately without fallback.
+ * Falls back to the next model when the current one throws a
+ * provider-side error (rate limit, timeout, 5xx, empty output, or invalid key).
+ * If a provider fails with an authentication error (401/403), that provider
+ * is skipped and the router attempts the next configured independent provider,
+ * rather than failing the entire request prematurely.
+ * Schema validation errors from INVALID_AI_RESPONSE propagate immediately without fallback.
  */
 export class LangChainFallbackRouter extends BaseChatModel {
   private readonly providers: Array<{ name: string; model: BaseChatModel }>;
@@ -92,28 +137,65 @@ export class LangChainFallbackRouter extends BaseChatModel {
 
     for (let i = 0; i < this.providers.length; i++) {
       const { name, model } = this.providers[i];
-      logger.info({ provider: name }, '[LLM] Attempting provider');
+      const start = Date.now();
+
+      logger.info({ provider: name, index: i }, '[LLM] Attempting provider');
 
       try {
-        // Delegate to the underlying LangChain model's _generate
         const result = await model._generate(messages, options as any, runManager);
-        logger.info({ provider: name }, '[LLM] Provider succeeded');
+
+        const elapsed = Date.now() - start;
+        logger.info(
+          { provider: name, elapsedMs: elapsed },
+          '[LLM] Provider succeeded'
+        );
         return result;
       } catch (err) {
+        const elapsed = Date.now() - start;
         const normalized = normalizeProviderError(err, name);
         lastError = normalized;
 
-        if (!isFallbackWorthy(normalized)) {
+        const isAuthOrPermError = isPermanentError(err);
+        const next = this.providers[i + 1];
+
+        // If the error is an auth/key error on this provider:
+        // Do not retry this provider, but if another independent provider is available,
+        // log a clear warning and fall back to it.
+        if (isAuthOrPermError) {
+          logger.warn(
+            {
+              provider: name,
+              error: normalized.message.slice(0, 200),
+              elapsedMs: elapsed,
+              fallingBackTo: next?.name ?? null
+            },
+            next
+              ? '[LLM] Provider has invalid credentials or permission error; skipping to next configured provider'
+              : '[LLM] Provider has invalid credentials or permission error; no providers left'
+          );
+
+          if (!next) {
+            throw normalized;
+          }
+          continue;
+        }
+
+        if (!isFallbackWorthy(normalized) && !isFallbackWorthy(err)) {
           logger.error(
-            { provider: name, error: normalized.message },
+            { provider: name, error: normalized.message.slice(0, 200), elapsedMs: elapsed },
             '[LLM] Non-fallback error, aborting'
           );
           throw normalized;
         }
 
-        const next = this.providers[i + 1];
         logger.warn(
-          { provider: name, error: normalized.message, fallingBackTo: next?.name },
+          {
+            provider: name,
+            error: normalized.message.slice(0, 200),
+            rawError: ((err as Error)?.message || String(err)).slice(0, 200),
+            elapsedMs: elapsed,
+            fallingBackTo: next?.name ?? null
+          },
           next ? '[LLM] Provider failed, falling back' : '[LLM] Provider failed, no providers left'
         );
       }
@@ -122,7 +204,7 @@ export class LangChainFallbackRouter extends BaseChatModel {
     const tried = this.providers.map((p) => p.name).join(' -> ');
     throw new ApiError(
       ErrorCode.AI_PROVIDER_ERROR,
-      `All LLM providers failed (${tried}): ${(lastError as Error)?.message ?? 'unknown'}`
+      `All LLM providers failed (${tried}): ${((lastError as Error)?.message ?? 'unknown').slice(0, 300)}`
     );
   }
 }
@@ -142,6 +224,12 @@ function buildProviderModel(name: string): { name: string; model: BaseChatModel 
 
     case 'gemini2':
       if (!isProviderConfigured('gemini2')) return null;
+      // Guard: if GEMINI_API_KEY_2 is identical to GEMINI_API_KEY, they are not
+      // distinct accounts; skip to prevent redundant quota exhaustion.
+      if (env.gemini2.apiKey && env.gemini.apiKey && env.gemini2.apiKey.trim() === env.gemini.apiKey.trim()) {
+        logger.warn('[LLM] GEMINI_API_KEY_2 is identical to GEMINI_API_KEY; skipping duplicate provider');
+        return null;
+      }
       return {
         name: 'gemini2',
         model: new ChatGoogleGenerativeAI({
