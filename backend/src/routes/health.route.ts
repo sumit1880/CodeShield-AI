@@ -22,7 +22,7 @@ healthRouter.get('/health/ready', async (_req, res) => {
     await prisma.$queryRaw`SELECT 1`;
     checks.database = { status: 'up' };
   } catch (err: any) {
-    checks.database = { status: 'down', error: err?.message || 'Database connection error' };
+    checks.database = { status: 'down', error: 'Database service is currently unreachable' };
   }
 
   try {

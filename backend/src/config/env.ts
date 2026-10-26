@@ -27,11 +27,23 @@ function listEnv(name: string, fallback: string[]): string[] {
   return parsed.length > 0 ? parsed : fallback;
 }
 
-function sanitizeGeminiModel(raw?: string): string {
-  if (!raw) return 'gemini-1.5-flash';
+/**
+ * Validates and sanitizes Gemini model names.
+ * Maps legacy/deprecated/retired model names to currently supported models.
+ */
+export function sanitizeGeminiModel(raw?: string): string {
+  if (!raw || !raw.trim()) return 'gemini-3.8-flash';
   const trimmed = raw.trim();
-  if (trimmed.startsWith('gemini-3') || trimmed === 'gemini-3.6-flash') {
-    return 'gemini-1.5-flash';
+  // Legacy / retired Gemini 1.5, 2.0, 2.5 flash -> upgrade to currently supported gemini-3.8-flash
+  if (
+    trimmed === 'gemini-1.5-flash' ||
+    trimmed === 'gemini-1.5-flash-latest' ||
+    trimmed === 'gemini-1.5-pro' ||
+    trimmed === 'gemini-2.0-flash' ||
+    trimmed === 'gemini-2.0-flash-exp' ||
+    trimmed === 'gemini-2.5-flash'
+  ) {
+    return 'gemini-3.8-flash';
   }
   return trimmed;
 }
@@ -50,9 +62,7 @@ export const env = {
   },
 
   // Second Gemini account, used as a fallback when the primary key hits a
-  // free-tier rate limit/outage. Falls back to GEMINI_MODEL if
-  // GEMINI_MODEL_2 isn't set, since it's usually the same model on a
-  // different account.
+  // free-tier rate limit/outage.
   gemini2: {
     apiKey: process.env.GEMINI_API_KEY_2 || '',
     model: sanitizeGeminiModel(process.env.GEMINI_MODEL_2 || process.env.GEMINI_MODEL)

@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { MulterError } from 'multer';
 import { ZodError } from 'zod';
+import { Prisma } from '@prisma/client';
 import { ApiError, ErrorCode } from '../utils/errors';
 import { logger } from '../utils/logger';
 
@@ -28,6 +29,29 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
         code: ErrorCode.INVALID_REQUEST,
         message: 'Request validation failed',
         details: err.flatten()
+      }
+    });
+  }
+
+  // Handle Prisma Database Connection & Query Errors gracefully
+  if (err instanceof Prisma.PrismaClientInitializationError) {
+    logger.error({ err }, '[Database] Failed to connect to database host');
+    return res.status(503).json({
+      success: false,
+      error: {
+        code: ErrorCode.DATABASE_ERROR,
+        message: 'Database service is currently unreachable. Please try again later.'
+      }
+    });
+  }
+
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    logger.error({ code: err.code, err }, '[Database] Prisma query request error');
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: ErrorCode.DATABASE_ERROR,
+        message: 'Database query execution failed.'
       }
     });
   }

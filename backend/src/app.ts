@@ -68,7 +68,51 @@ export function createApp(container: Container = buildContainer(), options: Crea
   // check but far below anything that could meaningfully exhaust memory;
   // the ZIP upload path is bounded separately by multer + safeExtract.
   app.use(express.json({ limit: '2mb' }));
-  app.use(pinoHttp({ logger, autoLogging: env.nodeEnv !== 'test' }));
+  app.use(
+    pinoHttp({
+      logger,
+      autoLogging: env.nodeEnv !== 'test',
+      serializers: {
+        req: (req: any) => {
+          const raw = req.raw || req;
+          const headers = { ...(raw.headers || {}) };
+          if (headers.authorization) headers.authorization = '[REDACTED]';
+          if (headers.cookie) headers.cookie = '[REDACTED]';
+          if (headers['x-api-key']) headers['x-api-key'] = '[REDACTED]';
+          return {
+            id: req.id,
+            method: req.method,
+            url: req.url,
+            query: req.query,
+            params: req.params,
+            headers,
+            remoteAddress: raw.socket?.remoteAddress,
+            remotePort: raw.socket?.remotePort
+          };
+        },
+        res: (res: any) => {
+          const raw = res.raw || res;
+          const headers = { ...(raw.getHeaders ? raw.getHeaders() : raw.headers || {}) };
+          if (headers['set-cookie']) headers['set-cookie'] = '[REDACTED]';
+          return {
+            statusCode: res.statusCode,
+            headers
+          };
+        }
+      },
+      redact: {
+        paths: [
+          'req.headers.authorization',
+          'req.headers.cookie',
+          'req.headers["x-api-key"]',
+          'res.headers["set-cookie"]',
+          'headers.authorization',
+          'headers.cookie'
+        ],
+        censor: '[REDACTED]'
+      }
+    })
+  );
 
   const rateLimiter =
     options.rateLimiter ??
