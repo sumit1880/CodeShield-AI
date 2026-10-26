@@ -253,7 +253,10 @@ export function buildProviderModel(name: string): ProviderEntry | null {
         model: new ChatGoogleGenerativeAI({
           apiKey: env.gemini.apiKey,
           model: env.gemini.model,
-          maxRetries: env.ai.maxRetries
+          maxRetries: env.ai.maxRetries,
+          // LOW reduces reasoning token overhead on gemini-3.x flash models.
+          // Value must be uppercase per GoogleGenerativeAIThinkingLevel enum.
+          thinkingConfig: { thinkingLevel: 'LOW' }
         }) as unknown as BaseChatModel
       };
 
@@ -276,7 +279,8 @@ export function buildProviderModel(name: string): ProviderEntry | null {
         model: new ChatGoogleGenerativeAI({
           apiKey: env.gemini2.apiKey,
           model: env.gemini2.model,
-          maxRetries: env.ai.maxRetries
+          maxRetries: env.ai.maxRetries,
+          thinkingConfig: { thinkingLevel: 'LOW' }
         }) as unknown as BaseChatModel
       };
 

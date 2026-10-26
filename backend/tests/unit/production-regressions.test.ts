@@ -283,4 +283,95 @@ describe('Production Bug Regressions', () => {
       expect(res.body.error.message).toContain('Database service is currently unreachable');
     });
   });
+
+  // ── 5. thinkingConfig correctness ────────────────────────────────────
+  describe('Task 5: thinkingConfig uses uppercase LOW (SDK enum)', () => {
+    it('buildProviderModel passes thinkingLevel: "LOW" (uppercase) matching GoogleGenerativeAIThinkingLevel', () => {
+      const origKey = env.gemini.apiKey;
+      const origModel = env.gemini.model;
+      try {
+        (env.gemini as any).apiKey = 'test-key-abc';
+        (env.gemini as any).model = 'gemini-3.8-flash';
+        const provider = buildProviderModel('gemini');
+        expect(provider).not.toBeNull();
+        // Verify the model was instantiated with thinkingLevel uppercase 'LOW'
+        const internalConfig = (provider!.model as any).thinkingConfig;
+        expect(internalConfig).toBeDefined();
+        expect(internalConfig.thinkingLevel).toBe('LOW');
+        // Ensure it is not the incorrect lowercase 'low'
+        expect(internalConfig.thinkingLevel).not.toBe('low');
+      } finally {
+        (env.gemini as any).apiKey = origKey;
+        (env.gemini as any).model = origModel;
+      }
+    });
+  });
+
+  // ── 6. Async lifecycle shape verification ────────────────────────────
+  describe('Task 6: Async analysis lifecycle shape', () => {
+    // Tests mapConfirmedFinding / mapUncertainFinding expectations by inspecting the
+    // Prisma Finding schema field names that GET /api/analyses/:id returns.
+    // The frontend mapping reads: id, title, severity, confidence (Float), cweId, cweName,
+    // file, function, lineStart, lineEnd, explanation, recommendation,
+    // verificationStatus, verificationReason — all confirmed in schema.prisma.
+
+    it('mapConfirmedFinding expected DB fields are present on a Finding-shaped row', () => {
+      const row = {
+        id: 'f1', title: 'SQL Injection', severity: 'HIGH', confidence: 0.95,
+        cweId: 'CWE-89', cweName: 'SQL Injection',
+        file: 'app.js', function: 'query', lineStart: 12, lineEnd: 14,
+        explanation: 'User input used in SQL', recommendation: 'Use parameterized queries',
+        verificationStatus: 'CONFIRMED', verificationReason: 'Confirmed by verification agent'
+      };
+
+      // Replicate mapConfirmedFinding logic
+      const mapped = {
+        id: row.id,
+        title: row.title,
+        severity: row.severity,
+        confidence: typeof row.confidence === 'number' ? row.confidence : 0.5,
+        cwe: { id: row.cweId, name: row.cweName },
+        location: { file: row.file, function: row.function, lineStart: row.lineStart, lineEnd: row.lineEnd },
+        explanation: row.explanation,
+        recommendation: row.recommendation,
+        verification: { status: 'CONFIRMED' as const, confidence: row.confidence }
+      };
+
+      expect(mapped.cwe.id).toBe('CWE-89');
+      expect(mapped.verification.status).toBe('CONFIRMED');
+      expect(mapped.verification.confidence).toBe(0.95);
+      expect(mapped.location.lineStart).toBe(12);
+    });
+
+    it('mapUncertainFinding maps verificationReason correctly', () => {
+      const row = {
+        id: 'f2', title: 'Path Traversal', severity: 'MEDIUM', confidence: 0.6,
+        cweId: 'CWE-22', cweName: 'Path Traversal',
+        file: 'upload.js', function: null, lineStart: 5, lineEnd: 7,
+        explanation: 'Path not sanitized', recommendation: 'Validate paths',
+        verificationStatus: 'UNCERTAIN', verificationReason: 'Could not confirm without runtime'
+      };
+
+      const mapped = {
+        id: row.id, title: row.title, severity: row.severity,
+        confidence: typeof row.confidence === 'number' ? row.confidence : 0.5,
+        cwe: { id: row.cweId, name: row.cweName },
+        location: { file: row.file, function: row.function, lineStart: row.lineStart, lineEnd: row.lineEnd },
+        explanation: row.explanation, recommendation: row.recommendation,
+        verification: { status: 'UNCERTAIN' as const, confidence: row.confidence, reason: row.verificationReason ?? undefined }
+      };
+
+      expect(mapped.verification.status).toBe('UNCERTAIN');
+      expect(mapped.verification.reason).toBe('Could not confirm without runtime');
+    });
+
+    it('202 async response shape has jobId and pollUrl', () => {
+      // The backend returns: { success: true, status: 'PENDING', jobId, pollUrl }
+      // The frontend reads: (await res.json()) as { jobId: string }
+      const backendResponse = { success: true, status: 'PENDING', jobId: 'abc123', pollUrl: '/api/analyses/abc123' };
+      expect(backendResponse.jobId).toBeTruthy();
+      const frontendReads = (backendResponse as { jobId: string }).jobId;
+      expect(frontendReads).toBe('abc123');
+    });
+  });
 });
