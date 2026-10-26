@@ -1,3 +1,4 @@
+import { buildAnalysesRouter } from '../../src/routes/analyses.route';
 import request from 'supertest';
 import pino from 'pino';
 import pinoHttp from 'pino-http';
@@ -372,6 +373,47 @@ describe('Production Bug Regressions', () => {
       expect(backendResponse.jobId).toBeTruthy();
       const frontendReads = (backendResponse as { jobId: string }).jobId;
       expect(frontendReads).toBe('abc123');
+    });
+  });
+
+  // ── 7. Analysis Polling Cache Invalidation ───────────────────────────
+  describe('Task 7: Polling GET /api/analyses/:id cache-control', () => {
+    it('sets Cache-Control: no-store and returns 200 even when If-None-Match header is provided', async () => {
+      const mockAnalysis = {
+        id: 'job-pending-1',
+        userId: 'test-user-id',
+        language: 'javascript',
+        status: 'PENDING',
+        findings: []
+      };
+
+      const mockContainer = {
+        prisma: {
+          analysis: {
+            findFirst: jest.fn().mockResolvedValue(mockAnalysis)
+          }
+        }
+      } as any;
+
+      const app = express();
+      app.use('/api/analyses', buildAnalysesRouter(mockContainer, {
+        authMiddleware: (req, _res, next) => {
+          (req as any).user = { id: 'test-user-id' };
+          next();
+        }
+      }));
+
+      const res = await request(app)
+        .get('/api/analyses/job-pending-1')
+        .set('If-None-Match', 'W/"123-fakeetag"')
+        .set('If-Modified-Since', 'Wed, 21 Oct 2026 07:28:00 GMT');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['cache-control']).toContain('no-store');
+      expect(res.headers['pragma']).toBe('no-cache');
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.id).toBe('job-pending-1');
+      expect(res.body.data.status).toBe('PENDING');
     });
   });
 });

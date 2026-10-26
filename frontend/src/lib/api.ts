@@ -124,11 +124,17 @@ async function pollForResult(
     await sleep(POLL_INTERVAL_MS, signal);
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-    const res = await fetch(`${BASE_URL}/api/analyses/${encodeURIComponent(jobId)}`, {
-      headers: { Authorization: `Bearer ${idToken}` },
+    const res = await fetch(`${BASE_URL}/api/analyses/${encodeURIComponent(jobId)}?_t=${Date.now()}`, {
+      cache: 'no-store',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        'Cache-Control': 'no-cache, no-store',
+        Pragma: 'no-cache'
+      },
       signal
     });
 
+    if (res.status === 304) continue;
     if (!res.ok) await handleResponse<never>(res);
 
     const body = (await res.json()) as { success: true; data: any };

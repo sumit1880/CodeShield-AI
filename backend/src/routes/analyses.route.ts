@@ -111,6 +111,15 @@ export function buildAnalysesRouter(container: Container, options: AnalysesRoute
         throw new ApiError(ErrorCode.NOT_FOUND, 'Analysis not found');
       }
 
+      delete req.headers['if-none-match'];
+      delete req.headers['if-modified-since'];
+      res.set({
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        Pragma: 'no-cache',
+        Expires: '0',
+        'Surrogate-Control': 'no-store'
+      });
+
       res.json({ success: true, data: analysis });
     } catch (err) {
       next(err);
