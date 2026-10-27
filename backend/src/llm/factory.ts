@@ -157,8 +157,32 @@ export class LangChainFallbackRouter extends BaseChatModel {
 
       logger.info({ provider: name, index: i }, '[LLM] Attempting provider');
 
+      let timer: NodeJS.Timeout | undefined;
       try {
-        const result = await model._generate(messages, options as any, runManager);
+        const timeoutMs = env.ai.requestTimeoutMs;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new ApiError(ErrorCode.AI_TIMEOUT, `${name} API request timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+
+          if (options?.signal) {
+            options.signal.addEventListener(
+              'abort',
+              () => {
+                if (timer) clearTimeout(timer);
+                reject(options.signal?.reason ?? new Error('Aborted'));
+              },
+              { once: true }
+            );
+          }
+        });
+
+        const result = await Promise.race([
+          model._generate(messages, options as any, runManager),
+          timeoutPromise
+        ]);
+
+        if (timer) clearTimeout(timer);
 
         const elapsed = Date.now() - start;
         logger.info(
@@ -167,6 +191,7 @@ export class LangChainFallbackRouter extends BaseChatModel {
         );
         return result;
       } catch (err) {
+        if (timer) clearTimeout(timer);
         const elapsed = Date.now() - start;
         const normalized = normalizeProviderError(err, name);
         lastError = normalized;
