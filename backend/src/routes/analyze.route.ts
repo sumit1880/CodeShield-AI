@@ -73,12 +73,18 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
               where: { id: pendingAnalysis.id },
               data: { status: 'RUNNING' }
             });
-            await container.orchestrator.analyzePastedCode({
+            const result = await container.orchestrator.analyzePastedCode({
               language: parsed.data.language,
               code: parsed.data.code,
               userId,
               analysisId: pendingAnalysis.id
             });
+            if (!result.persisted) {
+              await container.prisma.analysis.update({
+                where: { id: pendingAnalysis.id },
+                data: { status: 'FAILED' }
+              }).catch(() => {});
+            }
           } catch (bgErr) {
             logger.error({ requestId, bgErr }, 'Async analysis failed in background');
             await container.prisma.analysis.update({
@@ -169,13 +175,19 @@ export function buildAnalyzeRouter(container: Container, options: AnalyzeRouterO
                 throw new Error('Archive contained no usable files');
               }
 
-              await container.orchestrator.analyzeProject({
+              const result = await container.orchestrator.analyzeProject({
                 language,
                 files: extracted.map((f) => ({ relativePath: f.relativePath, absolutePath: f.absolutePath })),
                 projectRoot: tempDir,
                 userId,
                 analysisId: pendingAnalysis.id
               });
+              if (!result.persisted) {
+                await container.prisma.analysis.update({
+                  where: { id: pendingAnalysis.id },
+                  data: { status: 'FAILED' }
+                }).catch(() => {});
+              }
             });
           } catch (bgErr) {
             logger.error({ requestId, bgErr }, 'Async upload analysis failed in background');

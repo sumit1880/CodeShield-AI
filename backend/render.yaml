@@ -51,7 +51,7 @@ services:
       - key: AI_MAX_RETRIES
         value: "1"
       - key: AGENT_MAX_ANALYSIS_TIME_MS
-        value: "120000"
+        value: "240000"
       - key: AGENT_MAX_ITERATIONS
         value: "10"
       - key: AGENT_MAX_TOOL_CALLS

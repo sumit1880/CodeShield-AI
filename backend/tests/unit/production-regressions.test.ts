@@ -11,6 +11,12 @@ import { FakeChatModel } from '../../src/llm/fake-chat-model';
 import { generateStructuredWithModel } from '../../src/llm/structured-output';
 import { errorHandler } from '../../src/middleware/error-handler';
 import { z } from 'zod';
+import { finalizeNode } from '../../src/graph/nodes/finalize.node';
+import { AnalysisOrchestrator } from '../../src/orchestrator/analysis.orchestrator';
+import { CodeContextService } from '../../src/services/code-context/code-context.service';
+import { CodeSearchService } from '../../src/services/code-context/code-search.service';
+import { SemgrepService } from '../../src/services/semgrep/semgrep.service';
+import { isTimeoutError } from '../../src/llm/factory';
 
 describe('Production Bug Regressions', () => {
   // ── 1. Model Configuration & Sanitize Check ─────────────────────────
@@ -414,6 +420,99 @@ describe('Production Bug Regressions', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.id).toBe('job-pending-1');
       expect(res.body.data.status).toBe('PENDING');
+    });
+  });
+
+  // ── 8. Production Pipeline Robustness & State Transitions ───────────
+  describe('Task 8: Production Pipeline Robustness & State Transitions', () => {
+    it('isTimeoutError detects native TimeoutError by name and message', () => {
+      const errByName = new Error('The operation timed out');
+      errByName.name = 'TimeoutError';
+      expect(isTimeoutError(errByName)).toBe(true);
+
+      const errByMsg = new Error('Request deadline_exceeded after 20000ms');
+      expect(isTimeoutError(errByMsg)).toBe(true);
+    });
+
+    it('finalizeNode converts unclassified candidates to UNVERIFIED uncertain findings instead of dropping them', async () => {
+      const finalize = finalizeNode();
+      const mockState: any = {
+        candidateFindings: [
+          {
+            id: 'finding-1',
+            title: 'Unchecked Input in exec',
+            category: 'Command Injection',
+            evidence: 'child_process.exec(userInput)',
+            file: 'server.js',
+            lineStart: 42,
+            lineEnd: 45
+          }
+        ],
+        classifiedFindings: [],
+        verifiedById: {},
+        semgrepFindings: [],
+        iteration: 1,
+        toolCallCount: 1,
+        deadline: Date.now() - 1000,
+        stopReason: 'FINISHED'
+      };
+
+      const result = await finalize(mockState);
+      expect(result.finalized).toBeDefined();
+      const finalized = result.finalized as any;
+      expect(finalized.vulnerabilities).toHaveLength(0);
+      expect(finalized.uncertainFindings).toHaveLength(1);
+      expect(finalized.uncertainFindings[0]).toMatchObject({
+        id: 'finding-1',
+        title: 'Unchecked Input in exec',
+        severity: 'MEDIUM',
+        verification: expect.objectContaining({
+          status: 'UNVERIFIED',
+          reason: expect.stringContaining('before classification')
+        })
+      });
+      expect(finalized.partial).toBe(true);
+    });
+
+    it('AnalysisOrchestrator.persist rethrows error when updating an existing async analysis job', async () => {
+      const model = new FakeChatModel();
+      const updateMock = jest.fn().mockRejectedValue(new Error('Prisma connection timeout during write'));
+      const prismaMock = {
+        analysis: {
+          update: updateMock,
+          create: jest.fn()
+        }
+      } as any;
+
+      const orchestrator = new AnalysisOrchestrator({
+        detectionModel: model,
+        verificationModel: model,
+        semgrepService: new SemgrepService(),
+        retriever: { retrieveKnowledge: jest.fn().mockResolvedValue([]), _getRelevantDocuments: jest.fn().mockResolvedValue([]) } as any,
+        codeContextService: new CodeContextService(),
+        codeSearchService: new CodeSearchService(),
+        prisma: prismaMock
+      });
+
+      await expect(
+        (orchestrator as any).persist({
+          existingId: 'async-job-999',
+          userId: 'test-user',
+          language: 'javascript',
+          codeHash: 'hash123',
+          sourceType: 'PASTE',
+          durationMs: 500,
+          vulnerabilities: [],
+          uncertainFindings: [],
+          partial: false
+        })
+      ).rejects.toThrow('Prisma connection timeout during write');
+
+      expect(updateMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'async-job-999' }
+        })
+      );
     });
   });
 });

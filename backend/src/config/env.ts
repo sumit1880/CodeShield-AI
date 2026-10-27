@@ -94,7 +94,7 @@ export const env = {
   agent: {
     maxIterations: intEnv('AGENT_MAX_ITERATIONS', 10),
     maxToolCalls: intEnv('AGENT_MAX_TOOL_CALLS', 20),
-    maxAnalysisTimeMs: intEnv('AGENT_MAX_ANALYSIS_TIME_MS', 120000)
+    maxAnalysisTimeMs: intEnv('AGENT_MAX_ANALYSIS_TIME_MS', 240000)
   },
 
   // Multi-provider LLM configuration. Gemini is always attempted first

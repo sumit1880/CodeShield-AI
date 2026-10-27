@@ -71,9 +71,32 @@ export function finalizeNode() {
     }
 
     const classifiedIds = new Set(state.classifiedFindings.map((f) => f.id));
-    const unclassifiedCandidates = state.candidateFindings.filter(
-      (f) => !classifiedIds.has(f.id)
-    ).length;
+    const unclassified = state.candidateFindings.filter((f) => !classifiedIds.has(f.id));
+    for (const candidate of unclassified) {
+      uncertainFindings.push({
+        id: candidate.id,
+        title: candidate.title,
+        cwe: { id: 'CWE-Other', name: candidate.category || 'Potential Security Flaw' },
+        severity: 'MEDIUM',
+        confidence: 0.5,
+        location: {
+          file: candidate.file,
+          function: null,
+          lineStart: candidate.lineStart,
+          lineEnd: candidate.lineEnd
+        },
+        explanation:
+          candidate.evidence ||
+          'Candidate finding identified during initial detection but not classified before timeout or budget limit.',
+        recommendation: 'Review code around this location manually.',
+        verification: {
+          status: 'UNVERIFIED',
+          confidence: 0.5,
+          reason: 'Pipeline budget or deadline reached before classification'
+        }
+      });
+    }
+    const unclassifiedCandidates = unclassified.length;
 
     const stoppedByLimit =
       state.iteration > env.agent.maxIterations ||

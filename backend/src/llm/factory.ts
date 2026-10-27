@@ -54,8 +54,10 @@ export function isServerError(err: unknown): boolean {
 export function isTimeoutError(err: unknown): boolean {
   const status = (err as any)?.status ?? (err as any)?.response?.status;
   const msg = (err as any)?.message ?? '';
+  const name = (err as any)?.name ?? '';
   return (
     status === 408 ||
+    name === 'TimeoutError' ||
     /timeout|timed out|deadline_exceeded|408/i.test(msg) ||
     (err instanceof ApiError && err.code === ErrorCode.AI_TIMEOUT)
   );

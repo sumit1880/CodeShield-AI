@@ -282,7 +282,7 @@ export class AnalysisOrchestrator {
 
     if (!finalState.finalized) {
       logger.warn('[Graph] No finalized findings in terminal state — returning empty result');
-      return { vulnerabilities: [], uncertainFindings: [], rejectedCount: 0, partial: false };
+      return { vulnerabilities: [], uncertainFindings: [], rejectedCount: 0, partial: true };
     }
 
     logger.info(
@@ -357,6 +357,7 @@ export class AnalysisOrchestrator {
         await this.deps.prisma.analysis.update({
           where: { id: params.existingId },
           data: {
+            codeHash: params.codeHash,
             status: params.partial ? 'PARTIAL' : 'COMPLETED',
             completedAt: new Date(),
             durationMs: params.durationMs,
@@ -380,7 +381,10 @@ export class AnalysisOrchestrator {
       });
       return analysis.id;
     } catch (err) {
-      logger.error({ err }, 'Failed to persist analysis; returning results without storage');
+      logger.error({ err, existingId: params.existingId }, 'Failed to persist analysis');
+      if (params.existingId) {
+        throw err;
+      }
       return null;
     }
   }
