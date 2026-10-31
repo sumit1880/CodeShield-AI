@@ -1,6 +1,5 @@
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { z } from 'zod';
-import { env } from '../config/env';
 import { ApiError, ErrorCode } from '../utils/errors';
 import { logger } from '../utils/logger';
 
@@ -90,10 +89,7 @@ async function safeInvoke(
 
     const start = Date.now();
     try {
-      const callSignal = signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(env.ai.requestTimeoutMs)])
-        : AbortSignal.timeout(env.ai.requestTimeoutMs);
-      const response = await model.invoke(messages, { signal: callSignal } as any);
+      const response = await model.invoke(messages, { signal } as any);
 
       const text =
         typeof response.content === 'string'

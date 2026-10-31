@@ -47,7 +47,7 @@ services:
       - key: MAX_CONCURRENT_ANALYSES
         value: "3"
       - key: AI_REQUEST_TIMEOUT_MS
-        value: "20000"
+        value: "90000"
       - key: AI_MAX_RETRIES
         value: "1"
       - key: AGENT_MAX_ANALYSIS_TIME_MS

@@ -52,14 +52,19 @@ export function isServerError(err: unknown): boolean {
 }
 
 export function isTimeoutError(err: unknown): boolean {
+  if (err instanceof ApiError && err.code === ErrorCode.AI_TIMEOUT) {
+    return true;
+  }
   const status = (err as any)?.status ?? (err as any)?.response?.status;
-  const msg = (err as any)?.message ?? '';
-  const name = (err as any)?.name ?? '';
+  const code = (err as any)?.code;
+  const msg = String((err as any)?.message ?? '');
+  const name = String((err as any)?.name ?? '');
   return (
     status === 408 ||
     name === 'TimeoutError' ||
-    /timeout|timed out|deadline_exceeded|408/i.test(msg) ||
-    (err instanceof ApiError && err.code === ErrorCode.AI_TIMEOUT)
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKETTIMEDOUT' ||
+    /timeout|timed out|deadline_exceeded|408|abort.*due to timeout/i.test(msg)
   );
 }
 
@@ -152,42 +157,51 @@ export class LangChainFallbackRouter extends BaseChatModel {
     let lastError: unknown;
 
     for (let i = 0; i < this.providers.length; i++) {
+      // If the caller's overall signal was aborted, stop immediately without attempting further providers
+      if (options?.signal?.aborted) {
+        throw options.signal.reason ?? new Error('Aborted');
+      }
+
       const { name, model } = this.providers[i];
       const start = Date.now();
 
       logger.info({ provider: name, index: i }, '[LLM] Attempting provider');
 
+      // Create an independent AbortController for this provider attempt so that
+      // one provider's timeout aborts only its own in-flight call and does not cancel subsequent providers.
+      const providerController = new AbortController();
       let timer: NodeJS.Timeout | undefined;
+      let onParentAbort: (() => void) | undefined;
+
       try {
         const timeoutMs = env.ai.requestTimeoutMs;
+
+        // Propagate caller's overall abort signal to this provider's controller
+        if (options?.signal) {
+          onParentAbort = () => {
+            providerController.abort(options.signal?.reason ?? new Error('Aborted'));
+          };
+          options.signal.addEventListener('abort', onParentAbort, { once: true });
+        }
+
         const timeoutPromise = new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            reject(new ApiError(ErrorCode.AI_TIMEOUT, `${name} API request timed out after ${timeoutMs}ms`));
+            const timeoutErr = new ApiError(ErrorCode.AI_TIMEOUT, `${name} API request timed out after ${timeoutMs}ms`);
+            providerController.abort(timeoutErr);
+            reject(timeoutErr);
           }, timeoutMs);
-
-          if (options?.signal) {
-            if (options.signal.aborted) {
-              if (timer) clearTimeout(timer);
-              reject(options.signal.reason ?? new Error('Aborted'));
-              return;
-            }
-            options.signal.addEventListener(
-              'abort',
-              () => {
-                if (timer) clearTimeout(timer);
-                reject(options.signal?.reason ?? new Error('Aborted'));
-              },
-              { once: true }
-            );
-          }
         });
 
+        // Pass provider-specific signal to underlying provider model
+        const providerOptions = {
+          ...options,
+          signal: providerController.signal
+        };
+
         const result = await Promise.race([
-          model._generate(messages, options as any, runManager),
+          model._generate(messages, providerOptions as any, runManager),
           timeoutPromise
         ]);
-
-        if (timer) clearTimeout(timer);
 
         const elapsed = Date.now() - start;
         logger.info(
@@ -196,8 +210,13 @@ export class LangChainFallbackRouter extends BaseChatModel {
         );
         return result;
       } catch (err) {
-        if (timer) clearTimeout(timer);
         const elapsed = Date.now() - start;
+
+        // If the caller's overall signal was aborted, do not fall back; abort immediately
+        if (options?.signal?.aborted) {
+          throw options.signal.reason ?? (err instanceof Error ? err : new Error(String(err)));
+        }
+
         const normalized = normalizeProviderError(err, name);
         lastError = normalized;
 
@@ -264,6 +283,11 @@ export class LangChainFallbackRouter extends BaseChatModel {
           },
           next ? '[LLM] Provider failed, falling back' : '[LLM] Provider failed, no providers left'
         );
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (options?.signal && onParentAbort) {
+          options.signal.removeEventListener('abort', onParentAbort);
+        }
       }
     }
 

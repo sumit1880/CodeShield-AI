@@ -87,7 +87,7 @@ export const env = {
   // call may try multiple providers in sequence, and free-tier provider
   // quotas mean retries are not free.
   ai: {
-    requestTimeoutMs: intEnv('AI_REQUEST_TIMEOUT_MS', 20000),
+    requestTimeoutMs: intEnv('AI_REQUEST_TIMEOUT_MS', 90000),
     maxRetries: intEnv('AI_MAX_RETRIES', 1)
   },
 

@@ -1,9 +1,11 @@
 import { z } from 'zod';
 import { FakeChatModel } from '../../src/llm/fake-chat-model';
+import { env } from '../../src/config/env';
 import {
   LangChainFallbackRouter,
   isFallbackWorthy,
   isPermanentError,
+  isTimeoutError,
   normalizeProviderError
 } from '../../src/llm/factory';
 import {
@@ -88,6 +90,12 @@ describe('Provider error classification', () => {
     const normTimeout = normalizeProviderError(timeoutErr, 'gemini');
     expect(normTimeout.code).toBe(ErrorCode.AI_TIMEOUT);
     expect(isFallbackWorthy(normTimeout)).toBe(true);
+
+    expect(isTimeoutError(new ApiError(ErrorCode.AI_TIMEOUT, 'timeout'))).toBe(true);
+    expect(isTimeoutError({ code: 'ETIMEDOUT' })).toBe(true);
+    expect(isTimeoutError({ code: 'ESOCKETTIMEDOUT' })).toBe(true);
+    expect(isTimeoutError(new Error('The operation was aborted due to timeout'))).toBe(true);
+    expect(isTimeoutError({ name: 'TimeoutError', message: 'aborted' })).toBe(true);
 
     const netErr = new Error('fetch failed: socket hang up');
     expect(isFallbackWorthy(netErr)).toBe(true);
@@ -244,6 +252,112 @@ describe('LangChainFallbackRouter – fallback across providers', () => {
 
     await expect(generateStructuredWithModel(router, makeParams())).rejects.toThrow();
     expect(p1.calls).toHaveLength(1);
+  });
+
+  describe('Provider timeout and independent signal handling', () => {
+    let originalTimeoutMs: number;
+
+    beforeEach(() => {
+      originalTimeoutMs = env.ai.requestTimeoutMs;
+    });
+
+    afterEach(() => {
+      env.ai.requestTimeoutMs = originalTimeoutMs;
+    });
+
+    it('falls back to secondary provider when primary provider times out', async () => {
+      env.ai.requestTimeoutMs = 50; // fast timeout for test
+
+      const p1 = new FakeChatModel();
+      const p2 = new FakeChatModel();
+
+      p1.enqueueHang(); // primary hangs until timeout
+      p2.enqueue(VALID_RESPONSE); // fallback succeeds
+
+      const router = makeRouter(
+        { name: 'gemini', model: p1 },
+        { name: 'gemini2', model: p2 }
+      );
+
+      const result = await generateStructuredWithModel(router, makeParams());
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0].id).toBe('F1');
+      expect(p1.calls).toHaveLength(1);
+      expect(p2.calls).toHaveLength(1);
+    });
+
+    it('ensures secondary provider receives fresh independent signal and does not abort immediately after primary timeout', async () => {
+      env.ai.requestTimeoutMs = 60;
+
+      const p1 = new FakeChatModel();
+      const p2 = new FakeChatModel();
+
+      p1.enqueueHang(); // primary times out at 60ms
+      // secondary verifies its signal is NOT aborted and takes 20ms to respond
+      p2.enqueue(VALID_RESPONSE, 20);
+
+      const router = makeRouter(
+        { name: 'gemini', model: p1 },
+        { name: 'gemini2', model: p2 }
+      );
+
+      const start = Date.now();
+      const result = await generateStructuredWithModel(router, makeParams());
+      const elapsed = Date.now() - start;
+
+      expect(result.findings).toHaveLength(1);
+      // It took at least ~50ms (primary timeout) + secondary response
+      expect(elapsed).toBeGreaterThanOrEqual(45);
+      expect(p2.calls).toHaveLength(1);
+    });
+
+    it('throws AI_PROVIDER_ERROR when all providers time out', async () => {
+      env.ai.requestTimeoutMs = 40;
+
+      const p1 = new FakeChatModel();
+      const p2 = new FakeChatModel();
+
+      p1.enqueueHang();
+      p2.enqueueHang();
+
+      const router = makeRouter(
+        { name: 'gemini', model: p1 },
+        { name: 'gemini2', model: p2 }
+      );
+
+      await expect(generateStructuredWithModel(router, makeParams())).rejects.toMatchObject({
+        code: ErrorCode.AI_PROVIDER_ERROR,
+        message: expect.stringMatching(/All LLM providers failed.*gemini.*gemini2/i)
+      });
+    });
+
+    it('immediately aborts entire chain without fallback if global caller signal is aborted', async () => {
+      env.ai.requestTimeoutMs = 1000;
+
+      const p1 = new FakeChatModel();
+      const p2 = new FakeChatModel();
+
+      p1.enqueueHang();
+      p2.enqueue(VALID_RESPONSE);
+
+      const router = makeRouter(
+        { name: 'gemini', model: p1 },
+        { name: 'gemini2', model: p2 }
+      );
+
+      const controller = new AbortController();
+      const promise = generateStructuredWithModel(router, {
+        ...makeParams(),
+        signal: controller.signal
+      });
+
+      // Abort externally after 30ms
+      setTimeout(() => controller.abort(new Error('User cancelled analysis')), 30);
+
+      await expect(promise).rejects.toThrow('User cancelled analysis');
+      // Secondary provider must NOT have been called because overall signal was aborted
+      expect(p2.calls).toHaveLength(0);
+    });
   });
 });
 
