@@ -5,7 +5,7 @@ import { SemgrepService } from '../services/semgrep/semgrep.service';
 export const healthRouter = Router();
 
 healthRouter.get('/health', (_req, res) => {
-  res.json({ success: true, status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ success: true, status: 'ok', version: '1.0.1', timestamp: new Date().toISOString() });
 });
 
 healthRouter.get('/health/ready', async (_req, res) => {

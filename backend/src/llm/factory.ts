@@ -166,6 +166,11 @@ export class LangChainFallbackRouter extends BaseChatModel {
           }, timeoutMs);
 
           if (options?.signal) {
+            if (options.signal.aborted) {
+              if (timer) clearTimeout(timer);
+              reject(options.signal.reason ?? new Error('Aborted'));
+              return;
+            }
             options.signal.addEventListener(
               'abort',
               () => {
