@@ -35,19 +35,76 @@ function tryParseJson(text: string): unknown {
 
 /**
  * Returns true when the error is a transient invocation failure that
- * is worth retrying on the same model. Notice: Provider-level errors
- * that represent provider outages (503, rate limits) or permanent errors
- * should NOT be retried here within structured-output, because the
- * LangChainFallbackRouter handles provider retries/fallback.
- * Structured-output only retries transient empty responses from the SDK.
+ * is worth retrying (e.g. HTTP 503 high demand/overloaded, 429 rate limit/quota,
+ * 408/network timeouts, socket errors, transient provider outages, or empty responses).
+ * Permanent configuration/auth errors (401, 403, 404, invalid keys) and schema validation
+ * errors (INVALID_AI_RESPONSE) return false.
  */
 export function isTransientError(err: unknown): boolean {
-  if (err instanceof ApiError) return false;
-  const msg = String((err as Error)?.message ?? '');
+  if (!err) return false;
+
+  // Permanent schema validation errors must never be treated as transient
+  if (err instanceof ApiError && err.code === ErrorCode.INVALID_AI_RESPONSE) {
+    return false;
+  }
+
+  // Check ApiError instances
+  if (err instanceof ApiError) {
+    if (err.code === ErrorCode.AI_RATE_LIMIT || err.code === ErrorCode.AI_TIMEOUT) {
+      return true;
+    }
+    if (err.code === ErrorCode.AI_PROVIDER_ERROR) {
+      const msg = err.message || '';
+      // If it's a permanent configuration or auth error, not transient
+      if (/401|403|404|invalid.*key|unauthorized|forbidden|not found/i.test(msg)) {
+        return false;
+      }
+      return /5\d{2}|unavailable|high demand|overloaded|rate limit|quota|resource_exhausted|timeout|timed out|ECONNRESET|socket hang up|fetch failed|empty/i.test(msg);
+    }
+    return false;
+  }
+
+  // Check HTTP status code
+  const status = (err as any)?.status ?? (err as any)?.response?.status;
+  if (status === 401 || status === 403 || status === 404) {
+    return false;
+  }
+  if (status === 429 || status === 408 || (typeof status === 'number' && status >= 500 && status < 600)) {
+    return true;
+  }
+
+  const msg = String((err as any)?.message ?? (err as any)?.error?.message ?? '');
+
+  // Permanent auth/config errors
+  if (/401|403|404|invalid.*key|unauthorized|forbidden|not found for api version/i.test(msg)) {
+    return false;
+  }
+
   // Empty output from the model SDK
   if (/model output.*(empty|must contain)/i.test(msg) || /Empty model response/i.test(msg)) {
     return true;
   }
+
+  // Rate limits / 429
+  if (/rate limit|quota|resource_exhausted|429/i.test(msg)) {
+    return true;
+  }
+
+  // 5xx / Service Unavailable / high demand / overloaded
+  if (/5\d{2}|unavailable|high demand|overloaded/i.test(msg)) {
+    return true;
+  }
+
+  // Timeouts
+  if (/timeout|timed out|deadline_exceeded|408|abort.*due to timeout/i.test(msg)) {
+    return true;
+  }
+
+  // Network / socket errors
+  if (/ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up|fetch failed/i.test(msg)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -107,7 +164,8 @@ async function safeInvoke(
         lastErr = new Error('Empty model response');
 
         if (attempt < MAX_INVOKE_ATTEMPTS) {
-          await delayFn(RETRY_DELAY_MS);
+          const backoffMs = RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+          await delayFn(backoffMs);
           continue;
         }
         throw lastErr;
@@ -123,25 +181,31 @@ async function safeInvoke(
       const elapsed = Date.now() - start;
       lastErr = err;
 
+      const isTransient = isTransientError(err);
       logger.warn(
         {
           stage,
           attempt,
           elapsedMs: elapsed,
           errorMessage: (err as Error)?.message?.slice(0, 200),
-          isTransient: isTransientError(err)
+          isTransient
         },
         '[StructuredOutput] Model invocation failed'
       );
 
-      // Don't retry non-transient errors (auth, config, provider errors, etc.)
-      if (!isTransientError(err)) {
+      // Don't retry non-transient errors (auth, config, permanent errors, schema validation, etc.)
+      if (!isTransient) {
         throw err;
       }
 
-      // Retry after delay if we have attempts left
+      // Retry after exponential backoff if we have attempts left
       if (attempt < MAX_INVOKE_ATTEMPTS) {
-        await delayFn(RETRY_DELAY_MS);
+        const backoffMs = RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+        logger.info(
+          { stage, attempt, nextAttempt: attempt + 1, backoffMs },
+          '[StructuredOutput] Retrying after backoff'
+        );
+        await delayFn(backoffMs);
         continue;
       }
 

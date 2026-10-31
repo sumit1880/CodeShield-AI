@@ -21,33 +21,18 @@ const PROVIDER_ERROR_CODES = new Set<string>([
   ErrorCode.AI_PROVIDER_ERROR
 ]);
 
-export function isFallbackWorthy(err: unknown): boolean {
-  if (err instanceof ApiError && PROVIDER_ERROR_CODES.has(err.code)) {
-    return true;
-  }
-  // Raw errors (not ApiError) from LangChain SDK should also trigger fallback
-  // if they look like transient provider issues
-  if (!(err instanceof ApiError) && err instanceof Error) {
-    const msg = err.message || '';
-    if (/model output.*(empty|must contain)/i.test(msg)) return true;
-    if (/rate limit|quota|resource_exhausted|429/i.test(msg)) return true;
-    if (/5\d{2}|unavailable|high demand/i.test(msg)) return true;
-    if (/timeout|timed out|deadline_exceeded|408/i.test(msg)) return true;
-    if (/ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up|fetch failed/i.test(msg)) return true;
-  }
-  return false;
-}
-
 export function isRateLimitError(err: unknown): boolean {
   const status = (err as any)?.status ?? (err as any)?.response?.status ?? (err as any)?.code;
-  return status === 429 || /rate limit|quota|resource_exhausted/i.test(String((err as any)?.message || ''));
+  const msg = String((err as any)?.message ?? '');
+  return status === 429 || /rate limit|quota|resource_exhausted|too many requests/i.test(msg);
 }
 
 export function isServerError(err: unknown): boolean {
   const status = (err as any)?.status ?? (err as any)?.response?.status;
+  const msg = String((err as any)?.message ?? '');
   return (
     (typeof status === 'number' && status >= 500 && status < 600) ||
-    /503|502|504|500|unavailable|high demand/i.test(String((err as any)?.message || ''))
+    /5\d{2}|503|502|504|500|unavailable|high demand|overloaded/i.test(msg)
   );
 }
 
@@ -69,8 +54,37 @@ export function isTimeoutError(err: unknown): boolean {
 }
 
 export function isEmptyOutputError(err: unknown): boolean {
-  const msg = (err as any)?.message ?? '';
+  const msg = String((err as any)?.message ?? '');
   return /model output.*(empty|must contain)/i.test(msg);
+}
+
+export function isFallbackWorthy(err: unknown): boolean {
+  if (err instanceof ApiError && PROVIDER_ERROR_CODES.has(err.code)) {
+    return true;
+  }
+  if (err instanceof Error) {
+    if (isRateLimitError(err) || isServerError(err) || isTimeoutError(err) || isEmptyOutputError(err)) {
+      return true;
+    }
+    const msg = err.message || '';
+    if (/model output.*(empty|must contain)/i.test(msg)) return true;
+    if (/rate limit|quota|resource_exhausted|429/i.test(msg)) return true;
+    if (/5\d{2}|unavailable|high demand|overloaded/i.test(msg)) return true;
+    if (/timeout|timed out|deadline_exceeded|408|abort.*due to timeout/i.test(msg)) return true;
+    if (/ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up|fetch failed/i.test(msg)) return true;
+  }
+  return false;
+}
+
+let fallbackRouterDelayFn: (ms: number) => Promise<void> = (ms: number) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+export function setFallbackRouterDelayFn(fn: (ms: number) => Promise<void>): void {
+  fallbackRouterDelayFn = fn;
+}
+
+export function resetFallbackRouterDelayFn(): void {
+  fallbackRouterDelayFn = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -283,6 +297,15 @@ export class LangChainFallbackRouter extends BaseChatModel {
           },
           next ? '[LLM] Provider failed, falling back' : '[LLM] Provider failed, no providers left'
         );
+
+        if (next && (isServerError(err) || isRateLimitError(err) || isFallbackWorthy(err))) {
+          const fallbackDelayMs = 1000;
+          logger.info(
+            { provider: name, nextProvider: next.name, fallbackDelayMs },
+            '[LLM] Backing off before attempting fallback provider'
+          );
+          await fallbackRouterDelayFn(fallbackDelayMs);
+        }
       } finally {
         if (timer) clearTimeout(timer);
         if (options?.signal && onParentAbort) {

@@ -6,7 +6,10 @@ import {
   isFallbackWorthy,
   isPermanentError,
   isTimeoutError,
-  normalizeProviderError
+  normalizeProviderError,
+  setFallbackRouterDelayFn,
+  resetFallbackRouterDelayFn,
+  buildProviderModel
 } from '../../src/llm/factory';
 import {
   generateStructuredWithModel,
@@ -55,12 +58,14 @@ function makeRouter(
 }
 
 beforeAll(() => {
-  // Speed up test execution by bypassing actual delays in structured-output retries
+  // Speed up test execution by bypassing actual delays in structured-output retries and router fallback
   setStructuredOutputDelayFn(async () => {});
+  setFallbackRouterDelayFn(async () => {});
 });
 
 afterAll(() => {
   resetStructuredOutputDelayFn();
+  resetFallbackRouterDelayFn();
 });
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -106,12 +111,22 @@ describe('Provider error classification', () => {
     expect(isFallbackWorthy(normServer)).toBe(true);
   });
 
-  it('correctly identifies transient SDK errors in structured-output layer', () => {
+  it('correctly identifies transient SDK and provider errors in structured-output layer', () => {
     expect(isTransientError(new Error('model output must contain either output text or tool calls'))).toBe(true);
     expect(isTransientError(new Error('Empty model response'))).toBe(true);
-    // Provider ApiErrors must NOT be retried inside structured-output (router handles them)
-    expect(isTransientError(new ApiError(ErrorCode.AI_PROVIDER_ERROR, 'Google 503 high demand'))).toBe(false);
-    expect(isTransientError(new ApiError(ErrorCode.AI_RATE_LIMIT, 'rate limit'))).toBe(false);
+    expect(isTransientError({ status: 503, message: 'due to high demand' })).toBe(true);
+    expect(isTransientError(new Error('503 The model is overloaded. Please try again later.'))).toBe(true);
+    expect(isTransientError({ status: 429, message: 'Resource exhausted' })).toBe(true);
+    expect(isTransientError(new ApiError(ErrorCode.AI_PROVIDER_ERROR, 'Google 503 high demand'))).toBe(true);
+    expect(isTransientError(new ApiError(ErrorCode.AI_PROVIDER_ERROR, 'The model is overloaded. Please try again later.'))).toBe(true);
+    expect(isTransientError(new ApiError(ErrorCode.AI_RATE_LIMIT, 'rate limit'))).toBe(true);
+    expect(isTransientError(new ApiError(ErrorCode.AI_TIMEOUT, 'timeout'))).toBe(true);
+
+    // Permanent errors must not be transient
+    expect(isTransientError(new ApiError(ErrorCode.INVALID_AI_RESPONSE, 'Validation failed'))).toBe(false);
+    expect(isTransientError(new ApiError(ErrorCode.UNAUTHORIZED, '401 Unauthorized'))).toBe(false);
+    expect(isTransientError({ status: 401, message: 'Invalid API key' })).toBe(false);
+    expect(isTransientError({ status: 404, message: 'Model not found' })).toBe(false);
   });
 
   it('detects model refusals accurately', () => {
@@ -487,5 +502,90 @@ describe('generateStructuredWithModel – success cases', () => {
 
     const result = await generateStructuredWithModel(model, makeParams());
     expect(result.findings).toHaveLength(1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 7. Transient 503/429 retries with backoff & API key verification
+// ═══════════════════════════════════════════════════════════════════════
+describe('Transient 503/429 retries, backoff, and provider API keys', () => {
+  it('retries transient HTTP 503 high-demand error with backoff and succeeds', async () => {
+    const recordedDelays: number[] = [];
+    setStructuredOutputDelayFn(async (ms: number) => {
+      recordedDelays.push(ms);
+    });
+
+    try {
+      const model = new FakeChatModel();
+      // First attempt fails with 503 high demand
+      model.enqueueError(new Error('503 The model is overloaded. Please try again later.'));
+      // Second attempt succeeds
+      model.enqueue(VALID_RESPONSE);
+
+      const result = await generateStructuredWithModel(model, makeParams());
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0].id).toBe('F1');
+      expect(model.calls).toHaveLength(2);
+      expect(recordedDelays.length).toBeGreaterThanOrEqual(1);
+      expect(recordedDelays[0]).toBeGreaterThanOrEqual(1000); // Backoff applied
+    } finally {
+      setStructuredOutputDelayFn(async () => {});
+    }
+  });
+
+  it('fallback router applies backoff before attempting secondary provider on HTTP 503', async () => {
+    const fallbackDelays: number[] = [];
+    setFallbackRouterDelayFn(async (ms: number) => {
+      fallbackDelays.push(ms);
+    });
+
+    try {
+      const p1 = new FakeChatModel();
+      const p2 = new FakeChatModel();
+
+      p1.enqueueError(new Error('503 Service Unavailable: high demand'));
+      p2.enqueue(VALID_RESPONSE);
+
+      const router = makeRouter(
+        { name: 'gemini', model: p1 },
+        { name: 'gemini2', model: p2 }
+      );
+
+      const result = await generateStructuredWithModel(router, makeParams());
+      expect(result.findings).toHaveLength(1);
+      expect(p1.calls).toHaveLength(1);
+      expect(p2.calls).toHaveLength(1);
+      expect(fallbackDelays).toContain(1000);
+    } finally {
+      setFallbackRouterDelayFn(async () => {});
+    }
+  });
+
+  it('verifies that gemini and gemini2 instantiate with their respective API keys', () => {
+    const origKey1 = env.gemini.apiKey;
+    const origModel1 = env.gemini.model;
+    const origKey2 = env.gemini2.apiKey;
+    const origModel2 = env.gemini2.model;
+
+    try {
+      (env.gemini as any).apiKey = 'gemini-key-alpha';
+      (env.gemini as any).model = 'gemini-3.8-flash';
+      (env.gemini2 as any).apiKey = 'gemini-key-beta';
+      (env.gemini2 as any).model = 'gemini-3.8-flash';
+
+      const entry1 = buildProviderModel('gemini');
+      const entry2 = buildProviderModel('gemini2');
+
+      expect(entry1).not.toBeNull();
+      expect(entry2).not.toBeNull();
+      expect((entry1?.model as any).apiKey).toBe('gemini-key-alpha');
+      expect((entry2?.model as any).apiKey).toBe('gemini-key-beta');
+      expect((entry1?.model as any).apiKey).not.toEqual((entry2?.model as any).apiKey);
+    } finally {
+      (env.gemini as any).apiKey = origKey1;
+      (env.gemini as any).model = origModel1;
+      (env.gemini2 as any).apiKey = origKey2;
+      (env.gemini2 as any).model = origModel2;
+    }
   });
 });
