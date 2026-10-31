@@ -68,6 +68,12 @@ export const env = {
     model: sanitizeGeminiModel(process.env.GEMINI_MODEL_2 || process.env.GEMINI_MODEL)
   },
 
+  // Third Gemini account, used as a fallback when primary and secondary keys hit rate limits/outages.
+  gemini3: {
+    apiKey: process.env.GEMINI_API_KEY_3 || '',
+    model: sanitizeGeminiModel(process.env.GEMINI_MODEL_3 || process.env.GEMINI_MODEL)
+  },
+
   embeddingModel: process.env.EMBEDDING_MODEL || 'text-embedding-004',
 
   limits: {
@@ -101,7 +107,7 @@ export const env = {
   // unless LLM_PROVIDER_ORDER says otherwise; providers with missing
   // required config are simply skipped (not treated as a failure).
   llm: {
-    providerOrder: listEnv('LLM_PROVIDER_ORDER', ['gemini', 'gemini2', 'grok', 'llama']),
+    providerOrder: listEnv('LLM_PROVIDER_ORDER', ['gemini', 'gemini2', 'gemini3', 'grok', 'llama']),
     grok: {
       apiKey: process.env.GROK_API_KEY || '',
       model: process.env.GROK_MODEL || ''
@@ -142,6 +148,10 @@ function isGemini2Configured(): boolean {
   return Boolean(env.gemini2.apiKey);
 }
 
+function isGemini3Configured(): boolean {
+  return Boolean(env.gemini3.apiKey);
+}
+
 function isGrokConfigured(): boolean {
   return Boolean(env.llm.grok.apiKey && env.llm.grok.model);
 }
@@ -158,6 +168,8 @@ export function isProviderConfigured(name: string): boolean {
       return isGeminiConfigured();
     case 'gemini2':
       return isGemini2Configured();
+    case 'gemini3':
+      return isGemini3Configured();
     case 'grok':
       return isGrokConfigured();
     case 'llama':
@@ -179,7 +191,7 @@ export function validateStartupConfig(): void {
   const configuredProviders = env.llm.providerOrder.filter(isProviderConfigured);
   if (configuredProviders.length === 0) {
     problems.push(
-      'No LLM provider is configured. Set at least one of: GEMINI_API_KEY, GEMINI_API_KEY_2, ' +
+      'No LLM provider is configured. Set at least one of: GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, ' +
         '(GROK_API_KEY + GROK_MODEL), or (LLAMA_BASE_URL + LLAMA_MODEL).'
     );
   }

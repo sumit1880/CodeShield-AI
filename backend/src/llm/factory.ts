@@ -363,6 +363,34 @@ export function buildProviderModel(name: string): ProviderEntry | null {
         }) as unknown as BaseChatModel
       };
 
+    case 'gemini3':
+      if (!isProviderConfigured('gemini3')) return null;
+      // Guard: if GEMINI_API_KEY_3 is identical to GEMINI_API_KEY or GEMINI_API_KEY_2 AND they use the exact same model,
+      // they are not distinct provider accounts/configurations; skip duplicate provider.
+      if (
+        (env.gemini3.apiKey &&
+          env.gemini.apiKey &&
+          env.gemini3.apiKey.trim() === env.gemini.apiKey.trim() &&
+          env.gemini3.model === env.gemini.model) ||
+        (env.gemini3.apiKey &&
+          env.gemini2.apiKey &&
+          env.gemini3.apiKey.trim() === env.gemini2.apiKey.trim() &&
+          env.gemini3.model === env.gemini2.model)
+      ) {
+        logger.warn('[LLM] GEMINI_API_KEY_3 and model are identical to an earlier Gemini provider; skipping duplicate provider');
+        return null;
+      }
+      return {
+        name: 'gemini3',
+        modelName: env.gemini3.model,
+        model: new ChatGoogleGenerativeAI({
+          apiKey: env.gemini3.apiKey,
+          model: env.gemini3.model,
+          maxRetries: env.ai.maxRetries,
+          thinkingConfig: { thinkingLevel: 'LOW' }
+        }) as unknown as BaseChatModel
+      };
+
     case 'grok':
       if (!isProviderConfigured('grok')) return null;
       return {
@@ -408,7 +436,7 @@ export function buildChatModel(): BaseChatModel {
 
   if (providers.length === 0) {
     throw new Error(
-      'No LLM provider configured. Set GEMINI_API_KEY, GROK_API_KEY+GROK_MODEL, or LLAMA_BASE_URL+LLAMA_MODEL.'
+      'No LLM provider configured. Set GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, GROK_API_KEY+GROK_MODEL, or LLAMA_BASE_URL+LLAMA_MODEL.'
     );
   }
 

@@ -19,6 +19,10 @@ function buildProvider(name: string): LlmProvider | null {
       return isProviderConfigured('gemini2')
         ? new GeminiService(env.gemini2.apiKey, env.gemini2.model, 'gemini2')
         : null;
+    case 'gemini3':
+      return isProviderConfigured('gemini3')
+        ? new GeminiService(env.gemini3.apiKey, env.gemini3.model, 'gemini3')
+        : null;
     case 'grok':
       return isProviderConfigured('grok')
         ? new GenericOpenAiProvider({
@@ -57,7 +61,7 @@ export function buildLlmService(): LlmService {
 
   if (providers.length === 0) {
     throw new Error(
-      'No LLM provider configured. Set GEMINI_API_KEY, or GEMINI_API_KEY_2, or GROK_API_KEY+GROK_MODEL, or LLAMA_BASE_URL+LLAMA_MODEL.'
+      'No LLM provider configured. Set GEMINI_API_KEY, or GEMINI_API_KEY_2, or GEMINI_API_KEY_3, or GROK_API_KEY+GROK_MODEL, or LLAMA_BASE_URL+LLAMA_MODEL.'
     );
   }
 

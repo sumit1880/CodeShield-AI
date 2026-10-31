@@ -561,31 +561,158 @@ describe('Transient 503/429 retries, backoff, and provider API keys', () => {
     }
   });
 
-  it('verifies that gemini and gemini2 instantiate with their respective API keys', () => {
+  it('verifies that gemini, gemini2, and gemini3 instantiate with their respective API keys and independent models', () => {
     const origKey1 = env.gemini.apiKey;
     const origModel1 = env.gemini.model;
     const origKey2 = env.gemini2.apiKey;
     const origModel2 = env.gemini2.model;
+    const origKey3 = env.gemini3.apiKey;
+    const origModel3 = env.gemini3.model;
 
     try {
       (env.gemini as any).apiKey = 'gemini-key-alpha';
       (env.gemini as any).model = 'gemini-3.8-flash';
       (env.gemini2 as any).apiKey = 'gemini-key-beta';
-      (env.gemini2 as any).model = 'gemini-3.8-flash';
+      (env.gemini2 as any).model = 'gemini-3.8-pro';
+      (env.gemini3 as any).apiKey = 'gemini-key-gamma';
+      (env.gemini3 as any).model = 'gemini-2.5-pro';
 
       const entry1 = buildProviderModel('gemini');
       const entry2 = buildProviderModel('gemini2');
+      const entry3 = buildProviderModel('gemini3');
 
       expect(entry1).not.toBeNull();
       expect(entry2).not.toBeNull();
+      expect(entry3).not.toBeNull();
+
       expect((entry1?.model as any).apiKey).toBe('gemini-key-alpha');
       expect((entry2?.model as any).apiKey).toBe('gemini-key-beta');
-      expect((entry1?.model as any).apiKey).not.toEqual((entry2?.model as any).apiKey);
+      expect((entry3?.model as any).apiKey).toBe('gemini-key-gamma');
+
+      expect(entry1?.modelName).toBe('gemini-3.8-flash');
+      expect(entry2?.modelName).toBe('gemini-3.8-pro');
+      expect(entry3?.modelName).toBe('gemini-2.5-pro');
     } finally {
       (env.gemini as any).apiKey = origKey1;
       (env.gemini as any).model = origModel1;
       (env.gemini2 as any).apiKey = origKey2;
       (env.gemini2 as any).model = origModel2;
+      (env.gemini3 as any).apiKey = origKey3;
+      (env.gemini3 as any).model = origModel3;
+    }
+  });
+
+  it('a missing third key does not break existing configurations', () => {
+    const origKey1 = env.gemini.apiKey;
+    const origKey2 = env.gemini2.apiKey;
+    const origKey3 = env.gemini3.apiKey;
+
+    try {
+      (env.gemini as any).apiKey = 'gemini-key-alpha';
+      (env.gemini2 as any).apiKey = 'gemini-key-beta';
+      (env.gemini3 as any).apiKey = ''; // third key missing
+
+      const entry1 = buildProviderModel('gemini');
+      const entry2 = buildProviderModel('gemini2');
+      const entry3 = buildProviderModel('gemini3');
+
+      expect(entry1).not.toBeNull();
+      expect(entry2).not.toBeNull();
+      expect(entry3).toBeNull(); // Gracefully omitted without errors
+    } finally {
+      (env.gemini as any).apiKey = origKey1;
+      (env.gemini2 as any).apiKey = origKey2;
+      (env.gemini3 as any).apiKey = origKey3;
+    }
+  });
+
+  it('attempts the third Gemini provider after primary and secondary fail with 503, 429, and auth errors', async () => {
+    const p1 = new FakeChatModel();
+    const p2 = new FakeChatModel();
+    const p3 = new FakeChatModel();
+
+    // p1 fails with HTTP 503 high demand
+    p1.enqueueError(new Error('503 The model is overloaded. Please try again later.'));
+    // p2 fails with HTTP 429 rate limit
+    p2.enqueueError(new Error('429 Resource exhausted: quota exceeded'));
+    // p3 succeeds
+    p3.enqueue(VALID_RESPONSE);
+
+    const router = makeRouter(
+      { name: 'gemini', model: p1 },
+      { name: 'gemini2', model: p2 },
+      { name: 'gemini3', model: p3 }
+    );
+
+    const result = await generateStructuredWithModel(router, makeParams());
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0].id).toBe('F1');
+    expect(p1.calls).toHaveLength(1);
+    expect(p2.calls).toHaveLength(1);
+    expect(p3.calls).toHaveLength(1);
+  });
+
+  it('falls back to third Gemini provider after primary times out and secondary fails with 401 auth error', async () => {
+    const origTimeout = env.ai.requestTimeoutMs;
+    env.ai.requestTimeoutMs = 50;
+
+    try {
+      const p1 = new FakeChatModel();
+      const p2 = new FakeChatModel();
+      const p3 = new FakeChatModel();
+
+      // p1 hangs until timeout (50ms)
+      p1.enqueueHang();
+      // p2 fails with 401 Unauthorized
+      p2.enqueueError(new Error('401 Unauthorized: Invalid API key'));
+      // p3 succeeds
+      p3.enqueue(VALID_RESPONSE);
+
+      const router = makeRouter(
+        { name: 'gemini', model: p1 },
+        { name: 'gemini2', model: p2 },
+        { name: 'gemini3', model: p3 }
+      );
+
+      const result = await generateStructuredWithModel(router, makeParams());
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0].id).toBe('F1');
+      expect(p1.calls).toHaveLength(1);
+      expect(p2.calls).toHaveLength(1);
+      expect(p3.calls).toHaveLength(1);
+    } finally {
+      env.ai.requestTimeoutMs = origTimeout;
+    }
+  });
+
+  it('rejects duplicate credentials across all three Gemini providers and does not treat them as independent quota', () => {
+    const origKey1 = env.gemini.apiKey;
+    const origModel1 = env.gemini.model;
+    const origKey2 = env.gemini2.apiKey;
+    const origModel2 = env.gemini2.model;
+    const origKey3 = env.gemini3.apiKey;
+    const origModel3 = env.gemini3.model;
+
+    try {
+      (env.gemini as any).apiKey = 'shared-key';
+      (env.gemini as any).model = 'gemini-3.8-flash';
+
+      // gemini2 shares key and model -> duplicate
+      (env.gemini2 as any).apiKey = 'shared-key';
+      (env.gemini2 as any).model = 'gemini-3.8-flash';
+      expect(buildProviderModel('gemini2')).toBeNull();
+
+      // gemini3 shares key and model -> duplicate
+      (env.gemini3 as any).apiKey = 'shared-key';
+      (env.gemini3 as any).model = 'gemini-3.8-flash';
+      expect(buildProviderModel('gemini3')).toBeNull();
+    } finally {
+      (env.gemini as any).apiKey = origKey1;
+      (env.gemini as any).model = origModel1;
+      (env.gemini2 as any).apiKey = origKey2;
+      (env.gemini2 as any).model = origModel2;
+      (env.gemini3 as any).apiKey = origKey3;
+      (env.gemini3 as any).model = origModel3;
     }
   });
 });

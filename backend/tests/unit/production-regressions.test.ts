@@ -188,6 +188,69 @@ describe('Production Bug Regressions', () => {
         (env.gemini2 as any).model = origModel2;
       }
     });
+
+    it('skips duplicate gemini3 provider when API key and model are identical to gemini or gemini2', () => {
+      const origKey = env.gemini.apiKey;
+      const origModel = env.gemini.model;
+      const origKey2 = env.gemini2.apiKey;
+      const origModel2 = env.gemini2.model;
+      const origKey3 = env.gemini3.apiKey;
+      const origModel3 = env.gemini3.model;
+
+      try {
+        (env.gemini as any).apiKey = 'key-alpha';
+        (env.gemini as any).model = 'gemini-3.8-flash';
+        (env.gemini2 as any).apiKey = 'key-beta';
+        (env.gemini2 as any).model = 'gemini-3.8-flash';
+
+        // gemini3 duplicates gemini
+        (env.gemini3 as any).apiKey = 'key-alpha';
+        (env.gemini3 as any).model = 'gemini-3.8-flash';
+        expect(buildProviderModel('gemini3')).toBeNull();
+
+        // gemini3 duplicates gemini2
+        (env.gemini3 as any).apiKey = 'key-beta';
+        (env.gemini3 as any).model = 'gemini-3.8-flash';
+        expect(buildProviderModel('gemini3')).toBeNull();
+      } finally {
+        (env.gemini as any).apiKey = origKey;
+        (env.gemini as any).model = origModel;
+        (env.gemini2 as any).apiKey = origKey2;
+        (env.gemini2 as any).model = origModel2;
+        (env.gemini3 as any).apiKey = origKey3;
+        (env.gemini3 as any).model = origModel3;
+      }
+    });
+
+    it('keeps independent gemini3 provider when it has a distinct key and independent model', () => {
+      const origKey = env.gemini.apiKey;
+      const origModel = env.gemini.model;
+      const origKey2 = env.gemini2.apiKey;
+      const origModel2 = env.gemini2.model;
+      const origKey3 = env.gemini3.apiKey;
+      const origModel3 = env.gemini3.model;
+
+      try {
+        (env.gemini as any).apiKey = 'key-alpha';
+        (env.gemini as any).model = 'gemini-3.8-flash';
+        (env.gemini2 as any).apiKey = 'key-beta';
+        (env.gemini2 as any).model = 'gemini-3.8-flash';
+        (env.gemini3 as any).apiKey = 'key-gamma-distinct';
+        (env.gemini3 as any).model = 'gemini-2.5-pro';
+
+        const provider3 = buildProviderModel('gemini3');
+        expect(provider3).not.toBeNull();
+        expect(provider3?.name).toBe('gemini3');
+        expect(provider3?.modelName).toBe('gemini-2.5-pro');
+      } finally {
+        (env.gemini as any).apiKey = origKey;
+        (env.gemini as any).model = origModel;
+        (env.gemini2 as any).apiKey = origKey2;
+        (env.gemini2 as any).model = origModel2;
+        (env.gemini3 as any).apiKey = origKey3;
+        (env.gemini3 as any).model = origModel3;
+      }
+    });
   });
 
   // ── 3. Credential Redaction in Request Logs ─────────────────────────
