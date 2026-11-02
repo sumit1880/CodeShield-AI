@@ -31,6 +31,19 @@ function graphStateToAnalysisState(state: AnalysisGraphState) {
   };
 }
 
+// Marker read by finalize.node: a manager decision we had to discard means the plan was not
+// followed, so the result must be reported as PARTIAL instead of a clean COMPLETE.
+export const MANAGER_DEGRADED_MARKER = 'MANAGER_DECISION_INVALID';
+
+function degradedEntry(state: AnalysisGraphState, reason: string) {
+  return {
+    iteration: state.iteration,
+    action: 'FINISH' as const,
+    reason,
+    resultSummary: `${MANAGER_DEGRADED_MARKER}: ${reason}`
+  };
+}
+
 export function managerNode(deps: ManagerNodeDeps) {
   return async (state: AnalysisGraphState): Promise<AnalysisGraphUpdate> => {
     const compactState = buildManagerCompactState(graphStateToAnalysisState(state) as any);
@@ -48,6 +61,7 @@ export function managerNode(deps: ManagerNodeDeps) {
         logger.warn({ err }, '[Node:manager] Manager decision invalid or rejected by schema, defaulting to FINISH');
         return {
           nextAction: { action: 'FINISH', arguments: {}, reason: 'Unknown or invalid action, defaulting to FINISH' },
+          actionsTaken: [degradedEntry(state, 'Manager response invalid after repair')],
           iteration: state.iteration + 1
         };
       }
@@ -60,6 +74,7 @@ export function managerNode(deps: ManagerNodeDeps) {
       logger.warn({ action }, '[Node:manager] Manager chose unknown action, defaulting to FINISH');
       return {
         nextAction: { action: 'FINISH', arguments: {}, reason: 'Unknown action, defaulting to FINISH' },
+        actionsTaken: [degradedEntry(state, `Manager chose unknown action "${String(action).slice(0, 40)}"`)],
         iteration: state.iteration + 1
       };
     }

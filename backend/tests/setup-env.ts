@@ -29,3 +29,5 @@ process.env.RATE_LIMIT_MAX_REQUESTS = process.env.RATE_LIMIT_MAX_REQUESTS || '30
 process.env.MAX_CONCURRENT_ANALYSES = process.env.MAX_CONCURRENT_ANALYSES || '3';
 process.env.AI_REQUEST_TIMEOUT_MS = process.env.AI_REQUEST_TIMEOUT_MS || '20000';
 process.env.AI_MAX_RETRIES = process.env.AI_MAX_RETRIES || '1';
+process.env.LLM_PROVIDER_COOLDOWN_MS = process.env.LLM_PROVIDER_COOLDOWN_MS ?? '0';
+process.env.LLM_PERMANENT_COOLDOWN_MS = process.env.LLM_PERMANENT_COOLDOWN_MS ?? '0';

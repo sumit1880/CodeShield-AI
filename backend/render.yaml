@@ -22,18 +22,8 @@ services:
         sync: false
       - key: GEMINI_MODEL_3
         sync: false
-      - key: GROK_API_KEY
-        sync: false
-      - key: GROK_MODEL
-        sync: false
-      - key: LLAMA_API_KEY
-        sync: false
-      - key: LLAMA_BASE_URL
-        sync: false
-      - key: LLAMA_MODEL
-        sync: false
       - key: LLM_PROVIDER_ORDER
-        value: gemini,gemini2,gemini3,grok,llama
+        value: gemini,gemini2,gemini3
       - key: EMBEDDING_MODEL
         value: text-embedding-004
       - key: DATABASE_URL
@@ -51,9 +41,17 @@ services:
       - key: MAX_CONCURRENT_ANALYSES
         value: "3"
       - key: AI_REQUEST_TIMEOUT_MS
-        value: "90000"
+        value: "50000"
       - key: AI_MAX_RETRIES
         value: "1"
+      - key: AI_SDK_MAX_RETRIES
+        value: "0"
+      - key: LLM_FALLBACK_DELAY_MS
+        value: "1000"
+      - key: LLM_PROVIDER_COOLDOWN_MS
+        value: "60000"
+      - key: LLM_PERMANENT_COOLDOWN_MS
+        value: "600000"
       - key: AGENT_MAX_ANALYSIS_TIME_MS
         value: "240000"
       - key: AGENT_MAX_ITERATIONS

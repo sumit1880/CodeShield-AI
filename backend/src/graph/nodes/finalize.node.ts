@@ -103,7 +103,11 @@ export function finalizeNode() {
       state.toolCallCount >= env.agent.maxToolCalls ||
       (state.deadline > 0 && Date.now() > state.deadline);
 
+    // The manager's output was unusable and we fell back to FINISH: never report a clean COMPLETE.
+    const managerDegraded = (state.actionsTaken ?? []).some((a) => a.resultSummary?.startsWith('MANAGER_DECISION_INVALID'));
+
     const partial =
+      managerDegraded ||
       state.stopReason !== 'FINISHED' ||
       stoppedByLimit ||
       unclassifiedCandidates > 0 ||

@@ -2,6 +2,7 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { z } from 'zod';
 import { ApiError, ErrorCode } from '../utils/errors';
 import { logger } from '../utils/logger';
+import type { ResponseValidator } from './factory';
 
 /** Maximum number of invocation attempts per call (initial + retry). */
 const MAX_INVOKE_ATTEMPTS = 2;
@@ -135,7 +136,8 @@ async function safeInvoke(
   model: BaseChatModel,
   messages: Array<{ role: string; content: string }>,
   signal: AbortSignal | undefined,
-  stage: string
+  stage: string,
+  responseValidator?: ResponseValidator
 ): Promise<string> {
   let lastErr: unknown;
 
@@ -146,7 +148,7 @@ async function safeInvoke(
 
     const start = Date.now();
     try {
-      const response = await model.invoke(messages, { signal } as any);
+      const response = await model.invoke(messages, { signal, responseValidator } as any);
 
       const text =
         typeof response.content === 'string'
@@ -193,8 +195,10 @@ async function safeInvoke(
         '[StructuredOutput] Model invocation failed'
       );
 
-      // Don't retry non-transient errors (auth, config, permanent errors, schema validation, etc.)
-      if (!isTransient) {
+      // Don't retry non-transient errors (auth, config, permanent errors, schema validation, etc.).
+      // ApiErrors are final: they come from the fallback router, which has already walked the whole
+      // provider chain (re-invoking would repeat every timeout and replace the real error).
+      if (!isTransient || err instanceof ApiError) {
         throw err;
       }
 
@@ -264,6 +268,18 @@ export async function generateStructuredWithModel<T>(
     return { ok: true, data: result.data };
   };
 
+  // Lets the fallback router try the next provider when a provider answers 200 OK with
+  // unusable content (invalid JSON / schema mismatch / refusal) instead of blindly accepting it.
+  const responseValidator: ResponseValidator = (text) => {
+    const r = validate(text);
+    if (r.ok) return { ok: true };
+    return {
+      ok: false,
+      category: isRefusalResponse(text) ? 'refusal' : 'invalid_response',
+      message: r.error.slice(0, 200)
+    };
+  };
+
   // ── First invocation ──────────────────────────────────────────────────
   let firstText: string;
   try {
@@ -274,7 +290,8 @@ export async function generateStructuredWithModel<T>(
         { role: 'human', content: userPrompt }
       ],
       signal,
-      'initial'
+      'initial',
+      responseValidator
     );
   } catch (err) {
     if (err instanceof ApiError) {
@@ -321,7 +338,8 @@ export async function generateStructuredWithModel<T>(
         { role: 'human', content: repairUserPrompt }
       ],
       signal,
-      'repair'
+      'repair',
+      responseValidator
     );
   } catch (err) {
     if (err instanceof ApiError) {

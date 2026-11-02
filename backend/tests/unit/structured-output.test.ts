@@ -86,7 +86,7 @@ describe('Provider error classification', () => {
     const normalized = normalizeProviderError(err429, 'gemini');
     expect(normalized.code).toBe(ErrorCode.AI_RATE_LIMIT);
     expect(isFallbackWorthy(normalized)).toBe(true);
-    expect(isFallbackWorthy(err429)).toBe(false); // raw object without message pattern
+    expect(isFallbackWorthy(err429)).toBe(true); // status 429 alone is enough, regardless of message text
     expect(isFallbackWorthy(new Error('429 rate limit exceeded'))).toBe(true);
   });
 

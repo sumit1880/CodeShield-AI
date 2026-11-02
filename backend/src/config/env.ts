@@ -43,9 +43,27 @@ export function sanitizeGeminiModel(raw?: string): string {
     trimmed === 'gemini-2.0-flash-exp' ||
     trimmed === 'gemini-2.5-flash'
   ) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[Config] Gemini model "${trimmed}" is mapped to "gemini-3.8-flash" by sanitizeGeminiModel(). ` +
+        'Set GEMINI_MODEL / GEMINI_MODEL_2 / GEMINI_MODEL_3 to an explicit, currently supported model ID to avoid this remap.'
+    );
     return 'gemini-3.8-flash';
   }
   return trimmed;
+}
+
+export const GEMINI_PROVIDER_NAMES = ['gemini', 'gemini2', 'gemini3'] as const;
+
+function filterGeminiProviders(names: string[]): string[] {
+  const allowed = new Set<string>(GEMINI_PROVIDER_NAMES);
+  const kept = names.filter((n, i) => allowed.has(n) && names.indexOf(n) === i);
+  const dropped = names.filter((n) => !allowed.has(n));
+  if (dropped.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(`[Config] Ignoring non-Gemini entries in LLM_PROVIDER_ORDER: ${dropped.join(', ')}`);
+  }
+  return kept.length > 0 ? kept : [...GEMINI_PROVIDER_NAMES];
 }
 
 export const env = {
@@ -93,8 +111,22 @@ export const env = {
   // call may try multiple providers in sequence, and free-tier provider
   // quotas mean retries are not free.
   ai: {
+    // Hard wall-clock limit for ONE provider attempt. On expiry the underlying
+    // HTTP request is aborted (see AbortableChatGoogleGenerativeAI) and the
+    // router moves to the next provider.
     requestTimeoutMs: intEnv('AI_REQUEST_TIMEOUT_MS', 90000),
-    maxRetries: intEnv('AI_MAX_RETRIES', 1)
+    // Legacy variable (only used by the legacy src/services/llm stack).
+    maxRetries: intEnv('AI_MAX_RETRIES', 1),
+    // SDK-internal retries per provider attempt. 0 = the router's provider
+    // fallback is the only retry mechanism, so one attempt cannot silently
+    // take (1 + retries) x timeout.
+    sdkMaxRetries: intEnv('AI_SDK_MAX_RETRIES', 0),
+    // Pause before trying the next provider after a 429/5xx (not after a timeout).
+    fallbackDelayMs: intEnv('LLM_FALLBACK_DELAY_MS', 1000),
+    // How long a provider is skipped after a timeout / 429 / 503 / 5xx.
+    providerCooldownMs: intEnv('LLM_PROVIDER_COOLDOWN_MS', 60000),
+    // How long a provider is skipped after an auth / model-not-found error.
+    permanentCooldownMs: intEnv('LLM_PERMANENT_COOLDOWN_MS', 600000)
   },
 
   agent: {
@@ -103,20 +135,10 @@ export const env = {
     maxAnalysisTimeMs: intEnv('AGENT_MAX_ANALYSIS_TIME_MS', 240000)
   },
 
-  // Multi-provider LLM configuration. Gemini is always attempted first
-  // unless LLM_PROVIDER_ORDER says otherwise; providers with missing
-  // required config are simply skipped (not treated as a failure).
+  // LLM provider chain. Gemini-only: 'gemini' -> 'gemini2' -> 'gemini3'.
+  // Any other name in LLM_PROVIDER_ORDER is ignored (see filterGeminiProviders).
   llm: {
-    providerOrder: listEnv('LLM_PROVIDER_ORDER', ['gemini', 'gemini2', 'gemini3', 'grok', 'llama']),
-    grok: {
-      apiKey: process.env.GROK_API_KEY || '',
-      model: process.env.GROK_MODEL || ''
-    },
-    llama: {
-      apiKey: process.env.LLAMA_API_KEY || '',
-      baseUrl: process.env.LLAMA_BASE_URL || '',
-      model: process.env.LLAMA_MODEL || ''
-    }
+    providerOrder: filterGeminiProviders(listEnv('LLM_PROVIDER_ORDER', [...GEMINI_PROVIDER_NAMES]))
   },
 
   google: {
@@ -152,16 +174,6 @@ function isGemini3Configured(): boolean {
   return Boolean(env.gemini3.apiKey);
 }
 
-function isGrokConfigured(): boolean {
-  return Boolean(env.llm.grok.apiKey && env.llm.grok.model);
-}
-
-function isLlamaConfigured(): boolean {
-  // Local/self-hosted OpenAI-compatible inference servers often don't
-  // require an API key, so only base URL + model are mandatory.
-  return Boolean(env.llm.llama.baseUrl && env.llm.llama.model);
-}
-
 export function isProviderConfigured(name: string): boolean {
   switch (name) {
     case 'gemini':
@@ -170,10 +182,6 @@ export function isProviderConfigured(name: string): boolean {
       return isGemini2Configured();
     case 'gemini3':
       return isGemini3Configured();
-    case 'grok':
-      return isGrokConfigured();
-    case 'llama':
-      return isLlamaConfigured();
     default:
       return false;
   }
@@ -191,8 +199,7 @@ export function validateStartupConfig(): void {
   const configuredProviders = env.llm.providerOrder.filter(isProviderConfigured);
   if (configuredProviders.length === 0) {
     problems.push(
-      'No LLM provider is configured. Set at least one of: GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, ' +
-        '(GROK_API_KEY + GROK_MODEL), or (LLAMA_BASE_URL + LLAMA_MODEL).'
+      'No LLM provider is configured. Set at least one of: GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3.'
     );
   }
 

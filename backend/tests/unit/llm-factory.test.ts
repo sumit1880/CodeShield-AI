@@ -9,8 +9,8 @@ describe('buildLlmService', () => {
   it('returns a single Gemini provider directly when it is the only one configured', async () => {
     process.env.LLM_PROVIDER_ORDER = 'gemini';
     process.env.GEMINI_API_KEY = 'test-key';
-    process.env.GROK_API_KEY = '';
-    process.env.LLAMA_BASE_URL = '';
+    process.env.GEMINI_API_KEY_2 = '';
+    process.env.GEMINI_API_KEY_3 = '';
     jest.resetModules();
 
     const { buildLlmService } = await import('../../src/services/llm/llm-factory');
@@ -21,12 +21,10 @@ describe('buildLlmService', () => {
   });
 
   it('wraps multiple configured providers in an LlmRouter, skipping unconfigured ones', async () => {
-    process.env.LLM_PROVIDER_ORDER = 'gemini,grok,llama';
+    process.env.LLM_PROVIDER_ORDER = 'gemini,gemini2,gemini3';
     process.env.GEMINI_API_KEY = 'test-key';
-    process.env.GROK_API_KEY = ''; // not configured -> skipped
-    process.env.GROK_MODEL = '';
-    process.env.LLAMA_BASE_URL = 'https://llama.example.com/v1';
-    process.env.LLAMA_MODEL = 'llama-3.1-70b';
+    process.env.GEMINI_API_KEY_2 = 'test-key-2';
+    process.env.GEMINI_API_KEY_3 = ''; // not configured -> skipped
     jest.resetModules();
 
     const { buildLlmService } = await import('../../src/services/llm/llm-factory');
@@ -37,12 +35,10 @@ describe('buildLlmService', () => {
   });
 
   it('throws a clear error when no provider is configured', async () => {
-    process.env.LLM_PROVIDER_ORDER = 'gemini,grok,llama';
+    process.env.LLM_PROVIDER_ORDER = 'gemini,gemini2,gemini3';
     process.env.GEMINI_API_KEY = '';
-    process.env.GROK_API_KEY = '';
-    process.env.GROK_MODEL = '';
-    process.env.LLAMA_BASE_URL = '';
-    process.env.LLAMA_MODEL = '';
+    process.env.GEMINI_API_KEY_2 = '';
+    process.env.GEMINI_API_KEY_3 = '';
     jest.resetModules();
 
     const { buildLlmService } = await import('../../src/services/llm/llm-factory');
