@@ -6,6 +6,7 @@ import { VERIFICATION_SYSTEM_PROMPT, buildVerificationPromptTemplate } from '../
 import { VerificationResult } from '../../types/findings';
 import { logger } from '../../utils/logger';
 import { AnalysisGraphState, AnalysisGraphUpdate } from '../state';
+import { describeLlmFailure, isRecoverableLlmFailure, unverifiedVerdict } from './verification-failure';
 
 interface VerifyNodeDeps {
   model: BaseChatModel;
@@ -77,12 +78,43 @@ export function verifyNode(deps: VerifyNodeDeps) {
       analyzedFindingsJson: JSON.stringify(pending, null, 2)
     });
 
-    const result = await generateStructuredWithModel(deps.model, {
-      systemPrompt: VERIFICATION_SYSTEM_PROMPT,
-      userPrompt: variables.userContent,
-      schema: verificationOutputSchema,
-      signal: deps.signal
-    });
+    let result;
+    try {
+      result = await generateStructuredWithModel(deps.model, {
+        systemPrompt: VERIFICATION_SYSTEM_PROMPT,
+        userPrompt: variables.userContent,
+        schema: verificationOutputSchema,
+        signal: deps.signal
+      });
+    } catch (err) {
+      // Provider chain exhausted / refusal / invalid or empty output / rate limit / timeout.
+      // The router and generateStructuredWithModel already tried every provider (and one repair),
+      // so do NOT fail the whole analysis and do NOT retry: keep the detection + classification
+      // results and record each pending finding as UNVERIFIED (never CONFIRMED).
+      if (!isRecoverableLlmFailure(err, deps.signal)) throw err;
+
+      const why = describeLlmFailure(err);
+      logger.warn(
+        { pending: pending.length, why },
+        '[Node:verify] Verification could not be completed; findings kept as UNVERIFIED'
+      );
+      const reason = `Verification could not be completed: ${why}`;
+      return {
+        verifiedById: Object.fromEntries(
+          pending.map((f) => [f.id, unverifiedVerdict(f.id, f.confidence, reason)])
+        ),
+        toolCallCount: state.toolCallCount + 1,
+        actionsTaken: [
+          {
+            iteration: state.iteration,
+            action: 'VERIFY_FINDING',
+            reason: `${pending.length} classified finding(s) pending verification`,
+            resultSummary: `Verification failed; ${pending.length} finding(s) left UNVERIFIED`,
+            error: why
+          }
+        ]
+      };
+    }
 
     // Map LLM IDs back to stable finding-N IDs
     const verdicts: VerificationResult[] = result.findings.map((v, i) => {
@@ -91,9 +123,25 @@ export function verifyNode(deps: VerifyNodeDeps) {
     });
 
     const floored = applySemgrepErrorFloor(verdicts, state, pending);
-    const verifiedById = Object.fromEntries(floored.map((v) => [v.id, v]));
 
-    logger.info({ count: floored.length }, '[Node:verify] Verification complete');
+    // A schema-valid answer can still omit findings (e.g. {"findings": []}). Those must not
+    // look verified, and must not make the router re-force verify forever: mark them UNVERIFIED.
+    const answeredIds = new Set(floored.map((v) => v.id));
+    const missing = pending.filter((p) => !answeredIds.has(p.id));
+    const missingVerdicts = missing.map((f) =>
+      unverifiedVerdict(
+        f.id,
+        f.confidence,
+        'Verification could not be completed: the model returned no verdict for this finding'
+      )
+    );
+
+    const verifiedById = Object.fromEntries([...floored, ...missingVerdicts].map((v) => [v.id, v]));
+
+    logger.info(
+      { count: floored.length, missing: missing.length },
+      '[Node:verify] Verification complete'
+    );
 
     return {
       verifiedById,
@@ -103,7 +151,10 @@ export function verifyNode(deps: VerifyNodeDeps) {
           iteration: state.iteration,
           action: 'VERIFY_FINDING',
           reason: `${pending.length} classified finding(s) pending verification`,
-          resultSummary: `Verified ${floored.length} finding(s)`
+          resultSummary:
+            missing.length > 0
+              ? `Verified ${floored.length} finding(s); ${missing.length} left UNVERIFIED (no verdict returned)`
+              : `Verified ${floored.length} finding(s)`
         }
       ]
     };

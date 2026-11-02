@@ -76,6 +76,19 @@ export function routeFromManager(
   };
 
   const target = actionToNode[action];
+
+  // Detection already produced candidates (now classified + verified): a second pass over the same
+  // input adds nothing deterministic, but its candidates would be re-classified and re-verified,
+  // spending more of the free-tier quota. Finish instead of repeating it.
+  if (
+    target === 'detect' &&
+    state.candidateFindings.length > 0 &&
+    state.actionsTaken.some((a) => a.action === 'DETECT_VULNERABILITIES')
+  ) {
+    logger.info('[Router] Detection already ran and produced findings; not repeating it');
+    return 'finalize';
+  }
+
   if (target) return target;
 
   logger.warn({ action }, '[Router] Unknown action, routing to finalize');
@@ -124,6 +137,15 @@ export function routeFromWorker(
   if (unverified.length > 0) {
     logger.info({ count: unverified.length }, '[Router] Forcing verify from worker');
     return 'verify';
+  }
+
+  // Verification could not be completed for at least one finding (all providers failed, refusal,
+  // invalid/empty answer, or no verdict returned). Nothing else can resolve it, and the manager
+  // would have to call the same struggling providers: finish now. Finalize reports these findings
+  // as UNVERIFIED in a PARTIAL result, with detection/classification preserved.
+  if (Object.values(state.verifiedById).some((v) => v.status === 'UNVERIFIED')) {
+    logger.warn('[Router] Verification incomplete; finalizing with UNVERIFIED findings');
+    return 'finalize';
   }
 
   // Specialist work complete -> return to manager for next decision

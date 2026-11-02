@@ -62,10 +62,15 @@ export function finalizeNode() {
           verification: { status: 'UNCERTAIN', confidence: verdict.confidence, reason: verdict.reason }
         });
       } else {
-        // Not reached verification — report as UNVERIFIED, never upgrade to CONFIRMED
+        // No verdict, or a code-assigned UNVERIFIED one (verification could not be completed):
+        // report as UNVERIFIED with the reason, never upgrade to CONFIRMED
         uncertainFindings.push({
           ...base,
-          verification: { status: 'UNVERIFIED', confidence: finding.confidence }
+          verification: {
+            status: 'UNVERIFIED',
+            confidence: finding.confidence,
+            ...(verdict?.reason ? { reason: verdict.reason } : {})
+          }
         });
       }
     }

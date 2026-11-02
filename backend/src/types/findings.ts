@@ -2,10 +2,12 @@ export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
 /**
  * 'CONFIRMED' / 'REJECTED' / 'UNCERTAIN' are the Verification Agent's own
  * verdicts (UNCERTAIN tells the Manager more evidence is needed). 'UNVERIFIED'
- * is a code-assigned status (never produced by the LLM) applied at
- * finalization time to a classified finding that the pipeline ran out of
- * budget to verify at all (e.g. the global analysis timeout was hit before
- * VERIFY_FINDING could run on it). Only CONFIRMED findings ever ship as
+ * is a code-assigned status (never produced by the LLM) applied to a
+ * classified finding that could not be verified: the pipeline ran out of
+ * budget (e.g. the global analysis timeout was hit before VERIFY_FINDING
+ * could run on it), or verification itself failed (all providers failed,
+ * refused or returned unusable/missing verdicts; the reason says which).
+ * Only CONFIRMED findings ever ship as
  * VulnerabilityResponse/persist to the database; UNCERTAIN and UNVERIFIED
  * ship separately as "uncertain findings" so a timeout never silently
  * erases already-classified work.
