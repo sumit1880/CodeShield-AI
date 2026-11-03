@@ -126,10 +126,11 @@ async function pollForResult(
 
     const res = await fetch(`${BASE_URL}/api/analyses/${encodeURIComponent(jobId)}?_t=${Date.now()}`, {
       cache: 'no-store',
+      // Only headers the backend CORS config allows (Content-Type, Authorization, X-Requested-With).
+      // Cache-Control / Pragma request headers fail the browser's CORS preflight ("Failed to fetch");
+      // cache: 'no-store' and the ?_t= query param already prevent caching.
       headers: {
-        Authorization: `Bearer ${idToken}`,
-        'Cache-Control': 'no-cache, no-store',
-        Pragma: 'no-cache'
+        Authorization: `Bearer ${idToken}`
       },
       signal
     });
